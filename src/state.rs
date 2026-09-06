@@ -1,5 +1,5 @@
-//! Project-local machine state, stored in `.dirtbag/` (à la Vagrant's
-//! `.vagrant/`).
+//! Project-local machine state, stored in a `.dirtbag/` directory alongside
+//! the project's `dirtbag.toml`.
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub struct State {
     pub pid: Option<u32>,
     #[serde(default)]
     pub phase: Phase,
-    /// Fingerprint of the mount set the VM was last booted with, so `up` can
+    /// Fingerprint of the mount set the VM was last booted with, so `on` can
     /// detect config drift and suggest `dirtbag reload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mounts_hash: Option<String>,

@@ -2,8 +2,8 @@
 
 ![OG dirtbag](https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQIjOEsYxxTxENLI7y7o2Zo-SEzKI2kv7g0hij55QSoHA&s=10)
 
-A Vagrant-style CLI for managing [Tart](https://tart.run) VMs as disposable dev
-sandboxes — declare a sandbox in `dirtbag.toml`, then `dirtbag up` to get a
+A CLI for managing [Tart](https://tart.run) VMs as disposable dev
+sandboxes — declare a sandbox in `dirtbag.toml`, then `dirtbag on` to get a
 running, mounted, provisioned VM you can `ssh` into and `destroy` when done.
 
 Built for giving coding agents (and people) clean, reproducible, throwaway
@@ -11,10 +11,10 @@ environments to build and test in, isolated from the host.
 
 ```console
 $ dirtbag init          # scaffold dirtbag.toml + scripts/setup.sh
-$ dirtbag up            # clone → configure → boot headless → mount → copy → provision
+$ dirtbag on            # clone → configure → boot headless → mount → copy → provision
 $ dirtbag ssh           # drop into the VM
 $ dirtbag ssh -- make test
-$ dirtbag halt          # stop it
+$ dirtbag stop          # stop it
 $ dirtbag destroy       # delete the VM and local state
 ```
 
@@ -42,7 +42,7 @@ $ cp target/release/dirtbag /usr/local/bin/   # or anywhere on PATH
 $ mkdir my-sandbox && cd my-sandbox
 $ dirtbag init
 Created dirtbag.toml and scripts/setup.sh
-$ dirtbag up
+$ dirtbag on
 VM `dirtbag-my-sandbox-1a2b3c4d` is up at 192.168.64.3
 $ dirtbag ssh -- uname -a
 Linux ubuntu 7.0.0-... aarch64 GNU/Linux
@@ -56,7 +56,7 @@ relative paths resolve against that file's directory.
 
 ```toml
 # VM name. Optional — defaults to `dirtbag-<dir>-<hash>`, derived from the
-# project directory and persisted in .dirtbag/state.toml on first `up`.
+# project directory and persisted in .dirtbag/state.toml on first run.
 name  = "my-sandbox"
 
 # Base image to clone (OCI ref or a local VM name). Required.
@@ -69,15 +69,16 @@ disk   = 50      # disk size in GiB — grow-only (Tart cannot shrink a disk)
 
 # Live directory share (Tart --dir, virtiofs). Repeatable.
 [[mount]]
-name     = "project"              # unique; used as the virtiofs tag
-source   = "."                    # host path, relative to dirtbag.toml
-target   = "/home/admin/project"  # absolute guest mount point
+name     = "project"        # unique; used as the virtiofs tag
+source   = "."              # host path, relative to dirtbag.toml
+target   = "/opt/project"   # absolute guest mount point
 readonly = false
 
-# One-shot copy-in over SCP at `up` time (not kept in sync). Repeatable.
+# One-shot copy-in over SCP at `on` time (not kept in sync). Repeatable.
+# Copy targets must be writable by the ssh user (SCP runs without sudo).
 [[copy]]
 source = "./secrets.env"
-target = "/home/admin/.env"       # absolute guest path
+target = "/home/admin/.env"  # absolute guest path
 
 # Provisioning steps, run in order over SSH. Repeatable.
 # Each step has exactly one of `inline` or `path`.
@@ -108,11 +109,11 @@ Notes:
 | Command | Description |
 |---|---|
 | `dirtbag init` | Scaffold a starter `dirtbag.toml` and `scripts/setup.sh`. |
-| `dirtbag up` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision. Safe to re-run. |
+| `dirtbag on` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision. Re-running on a running VM is a no-op. |
 | `dirtbag ssh [-- CMD…]` | Interactive shell, or run `CMD` in the VM (its exit status is propagated). |
 | `dirtbag status` | Show the VM's phase, name, IP, and process liveness. Outside a project, lists all Tart VMs. |
-| `dirtbag halt` | Gracefully stop the VM. |
-| `dirtbag reload` | Halt and bring the VM back up to apply mount/resource changes. |
+| `dirtbag stop` | Gracefully stop the VM. |
+| `dirtbag reload` | Stop and bring the VM back on to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |
 | `dirtbag destroy` | Stop and delete the VM, and remove `.dirtbag/`. |
 
@@ -123,10 +124,10 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
 - **Detached boot.** `tart run` runs in the foreground for the life of the VM,
   so dirtbag spawns `tart run --no-graphics` in its own session (`setsid`), with
   output redirected to `.dirtbag/run.log`, and records the PID. The VM keeps
-  running after `dirtbag up` returns.
-- **State** lives in a project-local `.dirtbag/` directory (like Vagrant's
-  `.vagrant/`): the resolved VM name, the run PID, the lifecycle phase, and a
-  fingerprint of the mounts the VM booted with.
+  running after `dirtbag on` returns.
+- **State** lives in a project-local `.dirtbag/` directory: the resolved VM
+  name, the run PID, the lifecycle phase, and a fingerprint of the mounts the VM
+  booted with.
 - **Access is over SSH** (libssh2). The same session handles the boot readiness
   probe, `ssh -- CMD`, the interactive PTY shell, SCP copy-in, and running
   provisioners.
@@ -135,7 +136,7 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
 
 ## Troubleshooting
 
-**`dirtbag up` hangs at "waiting for ssh", or SSH fails with "No route to
+**`dirtbag on` hangs at "waiting for ssh", or SSH fails with "No route to
 host".** On macOS 15+/26, apps need **Local Network** permission to reach the
 Tart NAT bridge (`192.168.64.0/24`). Grant it under **System Settings → Privacy
 & Security → Local Network** for your terminal app, then retry. A VM getting an

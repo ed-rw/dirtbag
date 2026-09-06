@@ -14,10 +14,10 @@ use crate::cli::Command;
 pub fn dispatch(command: Command) -> Result<ExitCode> {
     match command {
         Command::Init => init::run().map(ok),
-        Command::Up => lifecycle::up().map(ok),
+        Command::On => lifecycle::on().map(ok),
         Command::Ssh { cmd } => ssh::run(cmd),
         Command::Status => lifecycle::status().map(ok),
-        Command::Halt => lifecycle::halt().map(ok),
+        Command::Stop => lifecycle::stop().map(ok),
         Command::Reload => lifecycle::reload().map(ok),
         Command::Destroy => lifecycle::destroy().map(ok),
         Command::Provision => provision::run().map(ok),

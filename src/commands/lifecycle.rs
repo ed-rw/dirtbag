@@ -1,4 +1,4 @@
-//! VM lifecycle commands: `up`, `status`, `halt`, `destroy`.
+//! VM lifecycle commands: `on`, `status`, `stop`, `reload`, `destroy`.
 
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,7 @@ fn is_running(tart: &Tart, name: &str) -> Result<bool> {
     Ok(tart.get(name)?.map(|v| v.running).unwrap_or(false))
 }
 
-pub fn up() -> Result<()> {
+pub fn on() -> Result<()> {
     let project = discover()?;
     let tart = Tart::locate()?;
     let mut state = load_or_init_state(&project)?;
@@ -89,7 +89,7 @@ pub fn up() -> Result<()> {
     let ip = wait_for_ip(&tart, &name, &state)?;
 
     // 5. On first boot only: wait for SSH, mount shares, copy files, provision.
-    // Re-running `up` on an already-running VM is a no-op (use `dirtbag reload`
+    // Re-running `on` on an already-running VM is a no-op (use `dirtbag reload`
     // to reattach changed mounts, or `dirtbag provision` to re-provision).
     if just_started {
         info!(vm = %name, %ip, "waiting for ssh");
@@ -125,14 +125,14 @@ fn mounts_fingerprint(dirs: &[DirShare]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// `dirtbag reload` — stop the VM (if running) and bring it back up so
+/// `dirtbag reload` — stop the VM (if running) and bring it back on so
 /// mount/resource changes take effect.
 pub fn reload() -> Result<()> {
     let project = discover()?;
     if State::load(&project.root)?.is_some() {
-        halt()?;
+        stop()?;
     }
-    up()
+    on()
 }
 
 fn wait_for_ip(tart: &Tart, name: &str, state: &State) -> Result<String> {
@@ -156,11 +156,11 @@ fn wait_for_ip(tart: &Tart, name: &str, state: &State) -> Result<String> {
     }
 }
 
-pub fn halt() -> Result<()> {
+pub fn stop() -> Result<()> {
     let project = discover()?;
     let tart = Tart::locate()?;
     let mut state = State::load(&project.root)?
-        .context("no dirtbag state for this project; run `dirtbag up` first")?;
+        .context("no dirtbag state for this project; run `dirtbag on` first")?;
 
     if is_running(&tart, &state.vm_name)? {
         info!(vm = %state.vm_name, "stopping");
@@ -171,7 +171,7 @@ pub fn halt() -> Result<()> {
     }
     state.phase = Phase::Stopped;
     state.save(&project.root)?;
-    println!("VM `{}` halted", state.vm_name);
+    println!("VM `{}` stopped", state.vm_name);
     Ok(())
 }
 
@@ -213,7 +213,7 @@ pub fn status() -> Result<()> {
 
 fn project_status(project: &Project) -> Result<()> {
     let Some(state) = State::load(&project.root)? else {
-        println!("not created — run `dirtbag up`");
+        println!("not created — run `dirtbag on`");
         return Ok(());
     };
     let tart = Tart::locate()?;

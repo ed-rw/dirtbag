@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-/// Vagrant-style CLI for managing Tart VMs as disposable dev sandboxes.
+/// A CLI for managing Tart VMs as disposable dev sandboxes.
 #[derive(Debug, Parser)]
 #[command(name = "dirtbag", version, about, long_about = None)]
 pub struct Cli {
@@ -18,7 +18,7 @@ pub enum Command {
     Init,
 
     /// Create and start the VM: clone, configure, run, mount, copy, provision.
-    Up,
+    On,
 
     /// Open an interactive shell in the VM, or run a command in it.
     Ssh {
@@ -31,9 +31,9 @@ pub enum Command {
     Status,
 
     /// Gracefully stop the VM.
-    Halt,
+    Stop,
 
-    /// Restart the VM to apply mount/resource changes (halt + up).
+    /// Restart the VM to apply mount/resource changes (stop + on).
     Reload,
 
     /// Stop and delete the VM and its local state.

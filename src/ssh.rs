@@ -1,12 +1,12 @@
 //! SSH access to the guest via libssh2 (`ssh2`).
 //!
-//! One mechanism handles everything: a readiness probe used by `up`, streaming
+//! One mechanism handles everything: a readiness probe used by `on`, streaming
 //! command execution for `ssh -- CMD` and provisioning, and an interactive PTY
 //! shell. Authentication is by password (Tart's `admin`/`admin` by default).
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -219,11 +219,13 @@ impl NonBlockingStdin {
     fn enable() -> Self {
         use nix::fcntl::{fcntl, FcntlArg, OFlag};
         let fd = std::io::stdin().as_raw_fd();
-        let prev = fcntl(fd, FcntlArg::F_GETFL)
+        // SAFETY: fd 0 (stdin) is valid for the life of the process.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let prev = fcntl(borrowed, FcntlArg::F_GETFL)
             .ok()
             .map(OFlag::from_bits_truncate);
         if let Some(flags) = prev {
-            let _ = fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
+            let _ = fcntl(borrowed, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
         }
         Self { fd, prev }
     }
@@ -232,7 +234,9 @@ impl NonBlockingStdin {
 impl Drop for NonBlockingStdin {
     fn drop(&mut self) {
         if let Some(flags) = self.prev {
-            let _ = nix::fcntl::fcntl(self.fd, nix::fcntl::FcntlArg::F_SETFL(flags));
+            // SAFETY: fd 0 (stdin) is valid for the life of the process.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(self.fd) };
+            let _ = nix::fcntl::fcntl(borrowed, nix::fcntl::FcntlArg::F_SETFL(flags));
         }
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! `tart run` runs in the foreground for the life of the VM, so dirtbag starts
 //! it in its own session (`setsid`) with stdio redirected to a log file, then
-//! records the PID in state. The process outlives the `dirtbag up` invocation.
+//! records the PID in state. The process outlives the `dirtbag on` invocation.
 
 use std::fs::File;
 use std::os::unix::process::CommandExt;

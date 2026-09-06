@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::{Config, CONFIG_FILE};
 
 const TEMPLATE: &str = r#"# dirtbag sandbox configuration.
-# Docs: https://tart.run  —  run `dirtbag up` to build this VM.
+# Docs: https://tart.run  —  run `dirtbag on` to build this VM.
 
 image = "ghcr.io/cirruslabs/ubuntu:latest"
 
@@ -18,9 +18,10 @@ memory = 4096   # MiB
 [[mount]]
 name   = "project"
 source = "."
-target = "/home/admin/project"
+target = "/opt/project"
 
-# Copy a file in once at `up` time (not kept in sync).
+# Copy a file in once at `on` time (not kept in sync).
+# Copy targets must be writable by the ssh user (copies run over SCP, no sudo).
 # [[copy]]
 # source = "./secrets.env"
 # target = "/home/admin/.env"
@@ -61,7 +62,7 @@ pub fn run() -> Result<()> {
     write_if_absent(&cwd.join("scripts").join("setup.sh"), SETUP_SH)?;
 
     println!("Created {CONFIG_FILE} and scripts/setup.sh");
-    println!("Next: edit dirtbag.toml, then run `dirtbag up`.");
+    println!("Next: edit dirtbag.toml, then run `dirtbag on`.");
     Ok(())
 }
 

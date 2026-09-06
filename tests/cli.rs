@@ -28,7 +28,7 @@ fn help_lists_all_commands() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     for cmd in [
-        "init", "up", "ssh", "status", "halt", "reload", "destroy", "provision",
+        "init", "on", "ssh", "status", "stop", "reload", "destroy", "provision",
     ] {
         assert!(text.contains(cmd), "help missing `{cmd}`:\n{text}");
     }
@@ -49,9 +49,9 @@ fn init_scaffolds_then_refuses_overwrite() {
 }
 
 #[test]
-fn up_without_config_reports_missing_toml() {
+fn on_without_config_reports_missing_toml() {
     let dir = tempdir().unwrap();
-    let out = run_in(dir.path(), &["up"]);
+    let out = run_in(dir.path(), &["on"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag.toml"));
 }
@@ -71,33 +71,33 @@ fn ssh_without_state_reports_no_state() {
     run_in(dir.path(), &["init"]);
     let out = run_in(dir.path(), &["ssh", "--", "true"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag up"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag on"));
 }
 
 /// Full lifecycle against a real VM. Ignored by default; needs tart + a Linux
 /// image pull + Local Network permission.
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
-fn e2e_up_ssh_destroy() {
+fn e2e_on_ssh_destroy() {
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("dirtbag.toml"),
         "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
          [resources]\ncpu = 2\nmemory = 2048\n\
-         [[mount]]\nname = \"project\"\nsource = \".\"\ntarget = \"/home/admin/project\"\n\
+         [[mount]]\nname = \"project\"\nsource = \".\"\ntarget = \"/opt/project\"\n\
          [[provision]]\nprivileged = true\ninline = '''\napt-get install -y -qq jq\n'''\n",
     )
     .unwrap();
 
-    let up = run_in(dir.path(), &["up"]);
-    assert!(up.status.success(), "up failed: {}", String::from_utf8_lossy(&up.stderr));
+    let on = run_in(dir.path(), &["on"]);
+    assert!(on.status.success(), "on failed: {}", String::from_utf8_lossy(&on.stderr));
 
     // Provisioning ran.
     let jq = run_in(dir.path(), &["ssh", "--", "jq", "--version"]);
     assert!(jq.status.success());
 
     // Mount is live.
-    let ls = run_in(dir.path(), &["ssh", "--", "ls", "/home/admin/project/dirtbag.toml"]);
+    let ls = run_in(dir.path(), &["ssh", "--", "ls", "/opt/project/dirtbag.toml"]);
     assert!(ls.status.success());
 
     let destroy = run_in(dir.path(), &["destroy"]);
