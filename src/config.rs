@@ -38,8 +38,18 @@ pub struct Config {
     #[serde(default, rename = "copy")]
     pub copies: Vec<Copy>,
 
+    /// Steps that configure the machine. Run once, on first boot.
     #[serde(default, rename = "provision")]
-    pub provisions: Vec<Provision>,
+    pub provisions: Vec<Step>,
+
+    /// Steps that prepare the machine. Run on every boot.
+    #[serde(default, rename = "on-boot")]
+    pub on_boots: Vec<Step>,
+
+    /// Steps that wind the machine down. Run before every stop, ahead of the
+    /// implicit final `sync`.
+    #[serde(default, rename = "on-shutdown")]
+    pub on_shutdowns: Vec<Step>,
 
     #[serde(default)]
     pub ssh: Ssh,
@@ -115,9 +125,20 @@ pub struct Copy {
     pub target: String,
 }
 
-/// One provisioning step: exactly one of `inline` or `path`.
+/// One script step: exactly one of `inline` or `path`. Shared by `[[provision]]`,
+/// `[[on-boot]]`, and `[[on-shutdown]]`.
+///
+/// A step may name itself with `id` and depend on earlier steps with `needs`.
+/// A step whose dependency did not succeed is skipped, not run.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Provision {
+pub struct Step {
+    /// Optional name, so later steps can depend on this one with `needs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Ids of earlier steps this one depends on. Skip this step if any of them
+    /// did not succeed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,22 +192,60 @@ impl Config {
                 bail!("copy target `{}` must be an absolute guest path", c.target);
             }
         }
-        for (i, p) in self.provisions.iter().enumerate() {
-            match (&p.inline, &p.path) {
-                (Some(_), Some(_)) => {
-                    bail!(
-                        "[[provision]] #{}: set only one of `inline` or `path`",
-                        i + 1
-                    )
-                }
-                (None, None) => {
-                    bail!("[[provision]] #{}: needs either `inline` or `path`", i + 1)
-                }
-                _ => {}
-            }
-        }
+        validate_steps(&self.provisions, "provision")?;
+        validate_steps(&self.on_boots, "on-boot")?;
+        validate_steps(&self.on_shutdowns, "on-shutdown")?;
         Ok(())
     }
+
+    /// The on-shutdown steps to run, with the always-last `sync` appended.
+    ///
+    /// `sync` flushes the guest filesystem so a hard power-off keeps the writes.
+    /// It is a plain step with no `needs`, so it runs even when an earlier step
+    /// failed.
+    pub fn on_shutdown_steps(&self) -> Vec<Step> {
+        let mut steps = self.on_shutdowns.clone();
+        steps.push(Step {
+            id: None,
+            needs: Vec::new(),
+            inline: Some("sync".to_string()),
+            path: None,
+            shell: None,
+            privileged: false,
+        });
+        steps
+    }
+}
+
+/// Each step needs exactly one of `inline` or `path`. Every `needs` entry must
+/// name an earlier step's `id`, and ids must be unique. `label` names the config
+/// section in error messages.
+fn validate_steps(steps: &[Step], label: &str) -> Result<()> {
+    let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (i, s) in steps.iter().enumerate() {
+        let n = i + 1;
+        match (&s.inline, &s.path) {
+            (Some(_), Some(_)) => bail!("[[{label}]] #{n}: set only one of `inline` or `path`"),
+            (None, None) => bail!("[[{label}]] #{n}: needs either `inline` or `path`"),
+            _ => {}
+        }
+        // Depend only on earlier steps, so a step's outcome is known when a
+        // later step asks about it.
+        for dep in &s.needs {
+            if !ids.contains(dep.as_str()) {
+                bail!("[[{label}]] #{n}: `needs` refers to `{dep}`, which is not an earlier step id");
+            }
+        }
+        if let Some(id) = s.id.as_deref() {
+            if id.trim().is_empty() {
+                bail!("[[{label}]] #{n}: `id` must not be empty");
+            }
+            if !ids.insert(id) {
+                bail!("[[{label}]] #{n}: duplicate step id `{id}`");
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Project {
@@ -401,6 +460,18 @@ echo hi
 '''
 privileged = true
 
+[[on-boot]]
+id = "warm"
+inline = "echo booted"
+
+[[on-boot]]
+needs = ["warm"]
+path = "scripts/start.sh"
+privileged = true
+
+[[on-shutdown]]
+inline = "echo bye"
+
 [ssh]
 user = "admin"
 password = "admin"
@@ -416,6 +487,13 @@ password = "admin"
         assert_eq!(c.copies.len(), 1);
         assert_eq!(c.provisions.len(), 1);
         assert!(c.provisions[0].privileged);
+        assert_eq!(c.on_boots.len(), 2);
+        assert_eq!(c.on_boots[0].inline.as_deref(), Some("echo booted"));
+        assert_eq!(c.on_boots[0].id.as_deref(), Some("warm"));
+        assert!(c.on_boots[1].privileged);
+        assert_eq!(c.on_boots[1].needs, ["warm"]);
+        assert_eq!(c.on_shutdowns.len(), 1);
+        assert_eq!(c.on_shutdowns[0].inline.as_deref(), Some("echo bye"));
         assert_eq!(c.ssh.user, "admin");
     }
 
@@ -488,6 +566,109 @@ password = "admin"
     fn rejects_empty_provision() {
         let err = Config::parse("image = \"x\"\n[[provision]]\nshell=\"bash\"\n").unwrap_err();
         assert!(err.to_string().contains("either"));
+    }
+
+    #[test]
+    fn rejects_empty_on_boot() {
+        let err = Config::parse("image = \"x\"\n[[on-boot]]\nshell=\"bash\"\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("on-boot"));
+        assert!(msg.contains("either"));
+    }
+
+    #[test]
+    fn rejects_on_boot_with_both_inline_and_path() {
+        let err = Config::parse("image = \"x\"\n[[on-boot]]\ninline=\"echo\"\npath=\"s.sh\"\n")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("on-boot"));
+        assert!(msg.contains("only one"));
+    }
+
+    #[test]
+    fn on_boots_default_empty() {
+        let c = Config::parse("image = \"x\"").unwrap();
+        assert!(c.on_boots.is_empty());
+    }
+
+    #[test]
+    fn rejects_empty_on_shutdown() {
+        let err = Config::parse("image = \"x\"\n[[on-shutdown]]\nshell=\"bash\"\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("on-shutdown"));
+        assert!(msg.contains("either"));
+    }
+
+    #[test]
+    fn on_shutdowns_default_empty() {
+        let c = Config::parse("image = \"x\"").unwrap();
+        assert!(c.on_shutdowns.is_empty());
+    }
+
+    #[test]
+    fn on_shutdown_steps_append_sync() {
+        let c = Config::parse("image=\"x\"\n[[on-shutdown]]\ninline=\"echo bye\"\n").unwrap();
+        let steps = c.on_shutdown_steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].inline.as_deref(), Some("echo bye"));
+        assert_eq!(steps[1].inline.as_deref(), Some("sync"));
+    }
+
+    #[test]
+    fn on_shutdown_steps_are_just_sync_by_default() {
+        let steps = Config::parse("image=\"x\"").unwrap().on_shutdown_steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].inline.as_deref(), Some("sync"));
+    }
+
+    #[test]
+    fn accepts_needs_referring_to_an_earlier_id() {
+        let c = Config::parse(
+            "image=\"x\"\n\
+             [[provision]]\nid=\"a\"\ninline=\"echo a\"\n\
+             [[provision]]\nneeds=[\"a\"]\ninline=\"echo b\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.provisions[1].needs, ["a"]);
+    }
+
+    #[test]
+    fn rejects_needs_on_unknown_id() {
+        let err = Config::parse("image=\"x\"\n[[provision]]\nneeds=[\"ghost\"]\ninline=\"echo\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("not an earlier step id"));
+    }
+
+    #[test]
+    fn rejects_needs_on_a_later_step() {
+        // A step may depend only on an earlier step, so a forward reference fails.
+        let err = Config::parse(
+            "image=\"x\"\n\
+             [[provision]]\nneeds=[\"b\"]\ninline=\"echo a\"\n\
+             [[provision]]\nid=\"b\"\ninline=\"echo b\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not an earlier step id"));
+    }
+
+    #[test]
+    fn rejects_self_referential_needs() {
+        let err = Config::parse(
+            "image=\"x\"\n[[provision]]\nid=\"a\"\nneeds=[\"a\"]\ninline=\"echo\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not an earlier step id"));
+    }
+
+    #[test]
+    fn rejects_duplicate_step_id() {
+        let err = Config::parse(
+            "image=\"x\"\n\
+             [[provision]]\nid=\"a\"\ninline=\"echo\"\n\
+             [[provision]]\nid=\"a\"\ninline=\"echo\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate step id"));
     }
 
     #[test]

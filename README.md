@@ -86,9 +86,10 @@ readonly = false
 source = "./secrets.env"
 target = "/home/admin/.env"  # absolute guest path
 
-# Provisioning steps, run in order over SSH. Repeatable.
-# Each step has exactly one of `inline` or `path`.
+# Provisioning steps run ONCE to configure the machine, in order, over SSH.
+# Repeatable. Each step has exactly one of `inline` or `path`.
 [[provision]]
+id     = "packages"                 # optional name, so later steps can `needs` it
 inline = '''
 apt-get update
 apt-get install -y build-essential
@@ -96,6 +97,27 @@ apt-get install -y build-essential
 # path       = "scripts/setup.sh"  # a script file, relative to dirtbag.toml
 # shell      = "bash"               # interpreter (default: bash)
 privileged = true                   # run via sudo
+
+# A step can depend on earlier steps by id. It is skipped (not run) if any
+# dependency did not succeed, and the skip propagates to steps that need it.
+[[provision]]
+needs  = ["packages"]
+inline = "make -C /opt/project"
+
+# on-boot steps run EVERY time the machine boots, after provisioning — to
+# prepare it for use (start services, agents, tunnels). Same shape as
+# [[provision]]; repeatable.
+[[on-boot]]
+inline = "systemctl --user start my-agent"
+# path       = "scripts/start.sh"
+# privileged = true
+
+# on-shutdown steps run EVERY time the machine stops (`down`/`reload`), before
+# the VM powers off — to flush state or drain work. dirtbag always runs `sync`
+# as the final step, so you never need to add it. Same shape as [[provision]];
+# repeatable.
+[[on-shutdown]]
+inline = "systemctl --user stop my-agent"
 
 # Optional — defaults to admin:admin (the Tart image default).
 [ssh]
@@ -106,6 +128,16 @@ password = "admin"
 Notes:
 - **Mounts are attached at boot.** Changing `[[mount]]` on a running VM takes
   effect after `dirtbag reload`.
+- **`[[provision]]` / `[[on-boot]]` / `[[on-shutdown]]`.** Provisioning
+  configures the machine and runs once (first boot); on-boot prepares the machine
+  for use and runs on every boot, after provisioning; on-shutdown winds it down
+  and runs before every stop. All run when dirtbag drives the lifecycle
+  (`up`/`down`/`reload`), not on a reboot or shutdown initiated inside the guest.
+- **Step dependencies.** Give a step an `id`, then `needs = ["that-id"]` on a
+  later step in the same list. Every runnable step is attempted in order — a
+  failure does not halt the list — but a step is skipped when a step it `needs`
+  did not succeed, and that skip propagates to anything that needs it. `up` and
+  `provision` still exit non-zero if any step failed.
 - On **Linux guests** dirtbag mounts each share inside the guest
   (`mount -t virtiofs <tag> <target>`); the mount point is created with `sudo`.
 - **Inline scripts** use TOML literal strings (`'''…'''`), so shell content is
@@ -116,10 +148,10 @@ Notes:
 | Command | Description |
 |---|---|
 | `dirtbag init` | Scaffold a starter `dirtbag.toml` and `scripts/setup.sh`. |
-| `dirtbag up` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision (first boot only). Re-running on a running VM is a no-op. |
+| `dirtbag up` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision (first boot only) → run on-boot steps. Re-running on a running VM is a no-op. |
 | `dirtbag ssh [-- CMD…]` | Interactive shell, or run `CMD` in the VM (its exit status is propagated). |
 | `dirtbag status` | Show the VM's name, state, and IP. Outside a project, lists all Tart VMs. |
-| `dirtbag down` | Flush the guest filesystem, then stop the VM. |
+| `dirtbag down` | Run on-shutdown steps → `sync` the guest → stop the VM. |
 | `dirtbag reload` | Bring the VM down and back up to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |
 | `dirtbag destroy` | Stop and delete the VM, and remove `.dirtbag/`. |
@@ -143,9 +175,14 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
   boot, tracked by a marker *inside the guest* (`/var/lib/dirtbag/provisioned`),
   so it belongs to the VM and cannot desync. Later boots re-mount the shares but
   skip provisioning. Use `dirtbag provision` to run the steps again.
-- **Down flushes the guest.** `tart stop` is a hard power-off, so `dirtbag down`
-  runs `sync` in the guest over SSH first. Without it, writes from the session
-  are lost on the next boot.
+- **Prepare on every boot.** `[[on-boot]]` steps run over SSH on every boot that
+  dirtbag drives (`up` on a stopped VM, and `reload`), after provisioning. Use
+  them to start services or agents the sandbox needs to be usable.
+- **Down winds the guest down.** `tart stop` is a hard power-off, so before it
+  `dirtbag down` runs the `[[on-shutdown]]` steps over SSH. The last step is
+  always an implicit `sync`; without it, writes from the session are lost on the
+  next boot. `sync` has no `needs`, so it runs even after a user step failed, and
+  the whole run is best-effort — a failure is logged and the VM still stops.
 - **Guests** implement a `Guest` trait so per-OS differences (e.g. Linux needing
   a manual virtiofs mount) live in one place.
 

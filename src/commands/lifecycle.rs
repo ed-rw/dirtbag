@@ -77,8 +77,9 @@ pub fn up() -> Result<()> {
     Ok(())
 }
 
-/// Configure the guest after a boot. Mount the shares every time. Copy files and
-/// run the provisioners only the first time, tracked by a marker in the guest.
+/// Configure the guest after a boot. Mount the shares and run the `[[on-boot]]`
+/// steps every time. Copy files and run the provisioners only the first time,
+/// tracked by a marker in the guest.
 fn configure_boot(project: &Project, ip: &str) -> Result<()> {
     info!(%ip, "waiting for ssh");
     let ssh = Ssh::connect_ready(
@@ -102,6 +103,9 @@ fn configure_boot(project: &Project, ip: &str) -> Result<()> {
         crate::provision::run_provisions(&ssh, project)?;
         guest.mark_provisioned(&ssh)?;
     }
+
+    // Prepare the machine on every boot, after provisioning.
+    crate::provision::run_on_boot(&ssh, project)?;
     Ok(())
 }
 
@@ -140,10 +144,10 @@ pub fn down() -> Result<()> {
     let name = project.vm_name();
 
     if is_running(&tart, &name)? {
-        // Tart stops the VM by a hard power-off, so flush the guest filesystem
-        // first. Otherwise unsynced writes from this session are lost.
-        if let Err(e) = sync_guest(&tart, &project, &name) {
-            warn!("could not flush the guest before stop: {e:#}");
+        // Tart stops the VM by a hard power-off, so wind the guest down first.
+        // Otherwise unsynced writes from this session are lost.
+        if let Err(e) = shutdown_guest(&tart, &project, &name) {
+            warn!("could not wind the guest down before stop: {e:#}");
         }
         info!(vm = %name, "stopping");
         tart.stop(&name).context("stopping VM")?;
@@ -154,8 +158,9 @@ pub fn down() -> Result<()> {
     Ok(())
 }
 
-/// Flush the guest filesystem over SSH so a hard power-off keeps the writes.
-fn sync_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
+/// Wind the guest down over SSH before a stop. Run the `[[on-shutdown]]` steps,
+/// the last of which is always `sync`, so a hard power-off keeps the writes.
+fn shutdown_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
     let ip = tart.ip(name)?.context("VM has no IP")?;
     let ssh = Ssh::connect(
         &ip,
@@ -163,11 +168,7 @@ fn sync_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
         &project.config.ssh.user,
         &project.config.ssh.password,
     )?;
-    let (code, out) = ssh.exec_capture("sync")?;
-    if code != 0 {
-        bail!("guest `sync` failed (exit {code}): {}", out.trim());
-    }
-    Ok(())
+    crate::provision::run_on_shutdown(&ssh, project)
 }
 
 pub fn destroy() -> Result<()> {

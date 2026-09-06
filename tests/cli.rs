@@ -129,25 +129,36 @@ fn e2e_up_ssh_destroy() {
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_provision_runs_once_across_restarts() {
     let dir = tempdir().unwrap();
-    // Each provisioner run appends one line to a guest file.
+    // Each provisioner run appends a line to one guest file; each on-boot run
+    // appends to another. The line counts show provision runs once while
+    // on-boot runs on every boot. The on-shutdown list also exercises
+    // dependency skipping: a failed step's dependent must not run, while the
+    // implicit `sync` (no deps) still does.
     std::fs::write(
         dir.path().join("dirtbag.toml"),
         "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
          [resources]\ncpu = 2\nmemory = 2048\n\
          [[mount]]\nname = \"project\"\nsource = \".\"\ntarget = \"/opt/project\"\n\
-         [[provision]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-provisions\n'''\n",
+         [[provision]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-provisions\n'''\n\
+         [[on-boot]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-onboot\n'''\n\
+         [[on-shutdown]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-onshutdown\n'''\n\
+         [[on-shutdown]]\nid = \"drain\"\ninline = '''\nexit 1\n'''\n\
+         [[on-shutdown]]\nneeds = [\"drain\"]\nprivileged = true\ninline = '''\ntouch /etc/dirtbag-skipped\n'''\n",
     )
     .unwrap();
 
-    let count_runs = |dir: &std::path::Path| -> usize {
-        let out = run_in(dir, &["ssh", "--", "cat", "/etc/dirtbag-provisions"]);
+    let count_lines = |dir: &std::path::Path, path: &str| -> usize {
+        let out = run_in(dir, &["ssh", "--", "cat", path]);
         assert!(
             out.status.success(),
-            "cat failed: {}",
+            "cat {path} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).lines().count()
     };
+    let count_runs = |dir: &std::path::Path| count_lines(dir, "/etc/dirtbag-provisions");
+    let count_boots = |dir: &std::path::Path| count_lines(dir, "/etc/dirtbag-onboot");
+    let count_shutdowns = |dir: &std::path::Path| count_lines(dir, "/etc/dirtbag-onshutdown");
 
     let first = run_in(dir.path(), &["up"]);
     assert!(
@@ -159,6 +170,11 @@ fn e2e_provision_runs_once_across_restarts() {
         count_runs(dir.path()),
         1,
         "provisioners should run once on first boot"
+    );
+    assert_eq!(
+        count_boots(dir.path()),
+        1,
+        "on-boot steps should run on the first boot"
     );
 
     assert!(run_in(dir.path(), &["down"]).status.success());
@@ -182,6 +198,29 @@ fn e2e_provision_runs_once_across_restarts() {
         count_runs(dir.path()),
         1,
         "provisioners must not run again on restart"
+    );
+
+    // The on-boot steps run again on the second boot.
+    assert_eq!(
+        count_boots(dir.path()),
+        2,
+        "on-boot steps must run on every boot"
+    );
+
+    // The on-shutdown steps ran on the one `down` between the two boots. The
+    // `sync` (no deps) ran too, so this file survived the hard power-off.
+    assert_eq!(
+        count_shutdowns(dir.path()),
+        1,
+        "on-shutdown steps must run on every stop"
+    );
+
+    // The step that needs the failed `drain` was skipped, so it never created
+    // its marker file.
+    let skipped = run_in(dir.path(), &["ssh", "--", "ls", "/etc/dirtbag-skipped"]);
+    assert!(
+        !skipped.status.success(),
+        "step depending on a failed step must be skipped"
     );
 
     // `dirtbag provision` runs them again on demand.
