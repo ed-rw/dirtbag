@@ -38,8 +38,18 @@ pub struct Config {
     #[serde(default, rename = "copy")]
     pub copies: Vec<Copy>,
 
+    /// Steps that configure the machine. Run once, on first boot.
     #[serde(default, rename = "provision")]
-    pub provisions: Vec<Provision>,
+    pub provisions: Vec<Step>,
+
+    /// Steps that prepare the machine. Run on every boot.
+    #[serde(default, rename = "on-boot")]
+    pub on_boots: Vec<Step>,
+
+    /// Steps that wind the machine down. Run before every stop, ahead of the
+    /// implicit final `sync`.
+    #[serde(default, rename = "on-shutdown")]
+    pub on_shutdowns: Vec<Step>,
 
     #[serde(default)]
     pub ssh: Ssh,
@@ -115,9 +125,10 @@ pub struct Copy {
     pub target: String,
 }
 
-/// One provisioning step: exactly one of `inline` or `path`.
+/// One script step: exactly one of `inline` or `path`. Shared by `[[provision]]`
+/// and `[[on-boot]]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Provision {
+pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,22 +182,26 @@ impl Config {
                 bail!("copy target `{}` must be an absolute guest path", c.target);
             }
         }
-        for (i, p) in self.provisions.iter().enumerate() {
-            match (&p.inline, &p.path) {
-                (Some(_), Some(_)) => {
-                    bail!(
-                        "[[provision]] #{}: set only one of `inline` or `path`",
-                        i + 1
-                    )
-                }
-                (None, None) => {
-                    bail!("[[provision]] #{}: needs either `inline` or `path`", i + 1)
-                }
-                _ => {}
-            }
-        }
+        validate_steps(&self.provisions, "provision")?;
+        validate_steps(&self.on_boots, "on-boot")?;
+        validate_steps(&self.on_shutdowns, "on-shutdown")?;
         Ok(())
     }
+}
+
+/// Each step needs exactly one of `inline` or `path`. `label` names the config
+/// section in error messages (`provision` or `on-boot`).
+fn validate_steps(steps: &[Step], label: &str) -> Result<()> {
+    for (i, s) in steps.iter().enumerate() {
+        match (&s.inline, &s.path) {
+            (Some(_), Some(_)) => {
+                bail!("[[{label}]] #{}: set only one of `inline` or `path`", i + 1)
+            }
+            (None, None) => bail!("[[{label}]] #{}: needs either `inline` or `path`", i + 1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl Project {
@@ -401,6 +416,16 @@ echo hi
 '''
 privileged = true
 
+[[on-boot]]
+inline = "echo booted"
+
+[[on-boot]]
+path = "scripts/start.sh"
+privileged = true
+
+[[on-shutdown]]
+inline = "echo bye"
+
 [ssh]
 user = "admin"
 password = "admin"
@@ -416,6 +441,11 @@ password = "admin"
         assert_eq!(c.copies.len(), 1);
         assert_eq!(c.provisions.len(), 1);
         assert!(c.provisions[0].privileged);
+        assert_eq!(c.on_boots.len(), 2);
+        assert_eq!(c.on_boots[0].inline.as_deref(), Some("echo booted"));
+        assert!(c.on_boots[1].privileged);
+        assert_eq!(c.on_shutdowns.len(), 1);
+        assert_eq!(c.on_shutdowns[0].inline.as_deref(), Some("echo bye"));
         assert_eq!(c.ssh.user, "admin");
     }
 
@@ -488,6 +518,43 @@ password = "admin"
     fn rejects_empty_provision() {
         let err = Config::parse("image = \"x\"\n[[provision]]\nshell=\"bash\"\n").unwrap_err();
         assert!(err.to_string().contains("either"));
+    }
+
+    #[test]
+    fn rejects_empty_on_boot() {
+        let err = Config::parse("image = \"x\"\n[[on-boot]]\nshell=\"bash\"\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("on-boot"));
+        assert!(msg.contains("either"));
+    }
+
+    #[test]
+    fn rejects_on_boot_with_both_inline_and_path() {
+        let err = Config::parse("image = \"x\"\n[[on-boot]]\ninline=\"echo\"\npath=\"s.sh\"\n")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("on-boot"));
+        assert!(msg.contains("only one"));
+    }
+
+    #[test]
+    fn on_boots_default_empty() {
+        let c = Config::parse("image = \"x\"").unwrap();
+        assert!(c.on_boots.is_empty());
+    }
+
+    #[test]
+    fn rejects_empty_on_shutdown() {
+        let err = Config::parse("image = \"x\"\n[[on-shutdown]]\nshell=\"bash\"\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("on-shutdown"));
+        assert!(msg.contains("either"));
+    }
+
+    #[test]
+    fn on_shutdowns_default_empty() {
+        let c = Config::parse("image = \"x\"").unwrap();
+        assert!(c.on_shutdowns.is_empty());
     }
 
     #[test]

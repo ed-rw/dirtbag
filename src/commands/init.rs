@@ -35,11 +35,18 @@ target = "/opt/{share}"
 # source = "./secrets.env"
 # target = "/home/admin/.env"
 
-# Provisioning steps run in order over SSH. Use `path` for a script file,
-# or `inline` for a snippet. `privileged = true` runs via sudo.
+# Provisioning steps run once, in order, over SSH to configure the machine.
+# Use `path` for a script file, or `inline` for a snippet. `privileged = true`
+# runs via sudo. Re-run them any time with `dirtbag provision`.
 [[provision]]
 path       = "scripts/setup.sh"
 privileged = true
+
+# on-boot steps run every time the machine boots, after provisioning — for
+# preparing the machine to be used (starting services, agents, tunnels). Same
+# shape as [[provision]].
+# [[on-boot]]
+# inline = "systemctl --user start my-agent"
 
 # SSH defaults to admin:admin (the Tart image default); omit [ssh] to accept it.
 # [ssh]
