@@ -89,6 +89,7 @@ target = "/home/admin/.env"  # absolute guest path
 # Provisioning steps run ONCE to configure the machine, in order, over SSH.
 # Repeatable. Each step has exactly one of `inline` or `path`.
 [[provision]]
+id     = "packages"                 # optional name, so later steps can `needs` it
 inline = '''
 apt-get update
 apt-get install -y build-essential
@@ -96,6 +97,12 @@ apt-get install -y build-essential
 # path       = "scripts/setup.sh"  # a script file, relative to dirtbag.toml
 # shell      = "bash"               # interpreter (default: bash)
 privileged = true                   # run via sudo
+
+# A step can depend on earlier steps by id. It is skipped (not run) if any
+# dependency did not succeed, and the skip propagates to steps that need it.
+[[provision]]
+needs  = ["packages"]
+inline = "make -C /opt/project"
 
 # on-boot steps run EVERY time the machine boots, after provisioning — to
 # prepare it for use (start services, agents, tunnels). Same shape as
@@ -126,6 +133,11 @@ Notes:
   for use and runs on every boot, after provisioning; on-shutdown winds it down
   and runs before every stop. All run when dirtbag drives the lifecycle
   (`up`/`down`/`reload`), not on a reboot or shutdown initiated inside the guest.
+- **Step dependencies.** Give a step an `id`, then `needs = ["that-id"]` on a
+  later step in the same list. Every runnable step is attempted in order — a
+  failure does not halt the list — but a step is skipped when a step it `needs`
+  did not succeed, and that skip propagates to anything that needs it. `up` and
+  `provision` still exit non-zero if any step failed.
 - On **Linux guests** dirtbag mounts each share inside the guest
   (`mount -t virtiofs <tag> <target>`); the mount point is created with `sudo`.
 - **Inline scripts** use TOML literal strings (`'''…'''`), so shell content is
@@ -169,8 +181,8 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
 - **Down winds the guest down.** `tart stop` is a hard power-off, so before it
   `dirtbag down` runs the `[[on-shutdown]]` steps over SSH. The last step is
   always an implicit `sync`; without it, writes from the session are lost on the
-  next boot. The steps are best-effort — a failure is logged and the VM still
-  stops — so a failing earlier step aborts the run before `sync`.
+  next boot. `sync` has no `needs`, so it runs even after a user step failed, and
+  the whole run is best-effort — a failure is logged and the VM still stops.
 - **Guests** implement a `Guest` trait so per-OS differences (e.g. Linux needing
   a manual virtiofs mount) live in one place.
 

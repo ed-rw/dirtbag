@@ -131,7 +131,9 @@ fn e2e_provision_runs_once_across_restarts() {
     let dir = tempdir().unwrap();
     // Each provisioner run appends a line to one guest file; each on-boot run
     // appends to another. The line counts show provision runs once while
-    // on-boot runs on every boot.
+    // on-boot runs on every boot. The on-shutdown list also exercises
+    // dependency skipping: a failed step's dependent must not run, while the
+    // implicit `sync` (no deps) still does.
     std::fs::write(
         dir.path().join("dirtbag.toml"),
         "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
@@ -139,7 +141,9 @@ fn e2e_provision_runs_once_across_restarts() {
          [[mount]]\nname = \"project\"\nsource = \".\"\ntarget = \"/opt/project\"\n\
          [[provision]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-provisions\n'''\n\
          [[on-boot]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-onboot\n'''\n\
-         [[on-shutdown]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-onshutdown\n'''\n",
+         [[on-shutdown]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-onshutdown\n'''\n\
+         [[on-shutdown]]\nid = \"drain\"\ninline = '''\nexit 1\n'''\n\
+         [[on-shutdown]]\nneeds = [\"drain\"]\nprivileged = true\ninline = '''\ntouch /etc/dirtbag-skipped\n'''\n",
     )
     .unwrap();
 
@@ -203,11 +207,20 @@ fn e2e_provision_runs_once_across_restarts() {
         "on-boot steps must run on every boot"
     );
 
-    // The on-shutdown steps ran on the one `down` between the two boots.
+    // The on-shutdown steps ran on the one `down` between the two boots. The
+    // `sync` (no deps) ran too, so this file survived the hard power-off.
     assert_eq!(
         count_shutdowns(dir.path()),
         1,
         "on-shutdown steps must run on every stop"
+    );
+
+    // The step that needs the failed `drain` was skipped, so it never created
+    // its marker file.
+    let skipped = run_in(dir.path(), &["ssh", "--", "ls", "/etc/dirtbag-skipped"]);
+    assert!(
+        !skipped.status.success(),
+        "step depending on a failed step must be skipped"
     );
 
     // `dirtbag provision` runs them again on demand.
