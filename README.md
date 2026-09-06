@@ -1,5 +1,7 @@
 # dirtbag
 
+![OG dirtbag](https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQIjOEsYxxTxENLI7y7o2Zo-SEzKI2kv7g0hij55QSoHA&s=10)
+
 A Vagrant-style CLI for managing [Tart](https://tart.run) VMs as disposable dev
 sandboxes — declare a sandbox in `dirtbag.toml`, then `dirtbag up` to get a
 running, mounted, provisioned VM you can `ssh` into and `destroy` when done.
