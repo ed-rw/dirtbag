@@ -59,22 +59,28 @@ relative paths resolve against that file's directory.
 # project path. Set it to pin the VM across directory moves.
 name  = "my-sandbox"
 
-# Base image to clone (OCI ref or a local VM name). Required.
+# Base image to clone (OCI ref or a local VM name). Required. cirruslabs
+# publishes ubuntu/debian/fedora images; tags at
+# https://github.com/cirruslabs/tart/pkgs/container/ubuntu
 image = "ghcr.io/cirruslabs/ubuntu:latest"
 
+# Optional — defaults to cpu = 2, memory = 4096. Omit the whole section to
+# accept the defaults. `disk` has no default.
 [resources]
 cpu    = 4       # number of vCPUs
 memory = 8192    # memory in MiB
 disk   = 50      # disk size in GiB — grow-only (Tart cannot shrink a disk)
 
 # Live directory share (Tart --dir, virtiofs). Repeatable.
+# `dirtbag init` fills name/target from the project directory; both are
+# optional and default to that name and /opt/<name>.
 [[mount]]
-name     = "project"        # unique; used as the virtiofs tag
-source   = "."              # host path, relative to dirtbag.toml
+name     = "project"        # virtiofs tag
+source   = "."              # host path, relative to dirtbag.toml (required)
 target   = "/opt/project"   # absolute guest mount point
 readonly = false
 
-# One-shot copy-in over SCP at `on` time (not kept in sync). Repeatable.
+# One-shot copy-in over SCP at `up` time (not kept in sync). Repeatable.
 # Copy targets must be writable by the ssh user (SCP runs without sudo).
 [[copy]]
 source = "./secrets.env"
@@ -91,14 +97,15 @@ apt-get install -y build-essential
 # shell      = "bash"               # interpreter (default: bash)
 privileged = true                   # run via sudo
 
+# Optional — defaults to admin:admin (the Tart image default).
 [ssh]
-user     = "admin"    # guest SSH user   (Tart image default: admin)
-password = "admin"    # guest SSH password (Tart image default: admin)
+user     = "admin"
+password = "admin"
 ```
 
 Notes:
-- **Mounts are attached at boot.** Changing `[[mount]]` on a running VM requires
-  `dirtbag reload` to reattach (a warning is printed if drift is detected).
+- **Mounts are attached at boot.** Changing `[[mount]]` on a running VM takes
+  effect after `dirtbag reload`.
 - On **Linux guests** dirtbag mounts each share inside the guest
   (`mount -t virtiofs <tag> <target>`); the mount point is created with `sudo`.
 - **Inline scripts** use TOML literal strings (`'''…'''`), so shell content is
@@ -111,7 +118,7 @@ Notes:
 | `dirtbag init` | Scaffold a starter `dirtbag.toml` and `scripts/setup.sh`. |
 | `dirtbag up` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision (first boot only). Re-running on a running VM is a no-op. |
 | `dirtbag ssh [-- CMD…]` | Interactive shell, or run `CMD` in the VM (its exit status is propagated). |
-| `dirtbag status` | Show the VM's phase, name, IP, and process liveness. Outside a project, lists all Tart VMs. |
+| `dirtbag status` | Show the VM's name, state, and IP. Outside a project, lists all Tart VMs. |
 | `dirtbag down` | Flush the guest filesystem, then stop the VM. |
 | `dirtbag reload` | Bring the VM down and back up to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |

@@ -45,20 +45,40 @@ pub struct Config {
     pub ssh: Ssh,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Resources {
-    pub cpu: Option<u32>,
+    #[serde(default = "default_cpu")]
+    pub cpu: u32,
     /// Memory in MiB.
-    pub memory: Option<u32>,
-    /// Disk size in GiB.
+    #[serde(default = "default_memory")]
+    pub memory: u32,
+    /// Disk size in GiB (grow-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<u32>,
+}
+
+fn default_cpu() -> u32 {
+    2
+}
+fn default_memory() -> u32 {
+    4096
+}
+
+impl Default for Resources {
+    fn default() -> Self {
+        Self {
+            cpu: default_cpu(),
+            memory: default_memory(),
+            disk: None,
+        }
+    }
 }
 
 impl Resources {
     pub fn to_tart(&self) -> tart::Resources {
         tart::Resources {
-            cpu: self.cpu,
-            memory_mib: self.memory,
+            cpu: Some(self.cpu),
+            memory_mib: Some(self.memory),
             disk_gb: self.disk,
         }
     }
@@ -66,10 +86,26 @@ impl Resources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Mount {
-    pub name: String,
+    /// Share name and virtiofs tag. Defaults to the project directory name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub source: String,
-    pub target: String,
+    /// Absolute guest mount point. Defaults to `/opt/<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(default)]
+    pub readonly: bool,
+}
+
+/// A [`Mount`] with its name and target defaults filled in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMount {
+    /// Share name and virtiofs tag.
+    pub name: String,
+    /// Config-relative host path.
+    pub source: String,
+    /// Absolute guest mount point.
+    pub target: String,
     pub readonly: bool,
 }
 
@@ -128,25 +164,8 @@ impl Config {
         if self.image.trim().is_empty() {
             bail!("`image` must not be empty");
         }
-        let mut seen_names = std::collections::HashSet::new();
-        let mut seen_targets = std::collections::HashSet::new();
-        for m in &self.mounts {
-            if m.name.trim().is_empty() {
-                bail!("each [[mount]] needs a non-empty `name`");
-            }
-            if !Path::new(&m.target).is_absolute() {
-                bail!("mount `{}` target must be an absolute guest path", m.name);
-            }
-            if !seen_names.insert(&m.name) {
-                bail!(
-                    "duplicate mount name `{}` — names become virtiofs tags and must be unique",
-                    m.name
-                );
-            }
-            if !seen_targets.insert(&m.target) {
-                bail!("duplicate mount target `{}`", m.target);
-            }
-        }
+        // Mounts need the project directory to resolve their defaults, so they
+        // are validated in `Project::mounts`.
         for c in &self.copies {
             if !Path::new(&c.target).is_absolute() {
                 bail!("copy target `{}` must be an absolute guest path", c.target);
@@ -196,30 +215,69 @@ impl Project {
         Ok(Self { root, config })
     }
 
+    /// The mounts with defaults filled in and validated. `name` defaults to the
+    /// project directory name; `target` defaults to `/opt/<name>`.
+    pub fn mounts(&self) -> Result<Vec<ResolvedMount>> {
+        let default_name = self.default_share_name();
+        let mut seen_names = std::collections::HashSet::new();
+        let mut seen_targets = std::collections::HashSet::new();
+        let mut resolved = Vec::with_capacity(self.config.mounts.len());
+        for m in &self.config.mounts {
+            let name = m.name.clone().unwrap_or_else(|| default_name.clone());
+            if name.trim().is_empty() {
+                bail!("a [[mount]] `name` must not be empty");
+            }
+            let target = m.target.clone().unwrap_or_else(|| format!("/opt/{name}"));
+            if !Path::new(&target).is_absolute() {
+                bail!("mount `{name}` target must be an absolute guest path");
+            }
+            if !seen_names.insert(name.clone()) {
+                bail!(
+                    "duplicate mount name `{name}` — names become virtiofs tags and must be unique"
+                );
+            }
+            if !seen_targets.insert(target.clone()) {
+                bail!("duplicate mount target `{target}`");
+            }
+            resolved.push(ResolvedMount {
+                name,
+                source: m.source.clone(),
+                target,
+                readonly: m.readonly,
+            });
+        }
+        Ok(resolved)
+    }
+
     /// Resolve mounts to absolute-host-path [`DirShare`]s for `tart run`.
-    pub fn dir_shares(&self) -> Vec<DirShare> {
-        self.config
-            .mounts
-            .iter()
+    pub fn dir_shares(&self) -> Result<Vec<DirShare>> {
+        Ok(self
+            .mounts()?
+            .into_iter()
             .map(|m| DirShare {
-                name: m.name.clone(),
+                name: m.name,
                 path: self.resolve_host_path(&m.source),
                 readonly: m.readonly,
             })
-            .collect()
+            .collect())
     }
 
     /// Mount sources that do not exist on the host, as (name, resolved path).
     /// Tart needs the host path to exist, so warn about these before boot.
-    pub fn missing_mount_sources(&self) -> Vec<(String, String)> {
-        self.config
-            .mounts
-            .iter()
+    pub fn missing_mount_sources(&self) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .mounts()?
+            .into_iter()
             .filter_map(|m| {
                 let resolved = self.resolve_host_path(&m.source);
-                (!Path::new(&resolved).exists()).then(|| (m.name.clone(), resolved))
+                (!Path::new(&resolved).exists()).then_some((m.name, resolved))
             })
-            .collect()
+            .collect())
+    }
+
+    /// Default share name and virtiofs tag: the sanitized project directory name.
+    fn default_share_name(&self) -> String {
+        share_name_for(&self.root)
     }
 
     /// Resolve a config-relative host path to an absolute string.
@@ -271,6 +329,15 @@ fn derive_vm_name(root: &Path) -> String {
         "dirtbag-{base}-{:08x}",
         (hasher.finish() & 0xffff_ffff) as u32
     )
+}
+
+/// The default share name for a project directory: its sanitized name, or
+/// `project` when the directory has no usable name. Shared with `init`.
+pub fn share_name_for(root: &Path) -> String {
+    root.file_name()
+        .map(|s| sanitize(&s.to_string_lossy()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "project".to_string())
 }
 
 /// Keep `[A-Za-z0-9_-]`. Replace all other characters with `-`.
@@ -343,7 +410,7 @@ password = "admin"
     fn parses_full_config() {
         let c = Config::parse(FULL).unwrap();
         assert_eq!(c.name.as_deref(), Some("demo"));
-        assert_eq!(c.resources.cpu, Some(4));
+        assert_eq!(c.resources.cpu, 4);
         assert_eq!(c.mounts.len(), 2);
         assert!(c.mounts[1].readonly);
         assert_eq!(c.copies.len(), 1);
@@ -361,6 +428,32 @@ password = "admin"
     }
 
     #[test]
+    fn resources_default_when_omitted() {
+        let c = Config::parse("image = \"x\"").unwrap();
+        assert_eq!(c.resources.cpu, 2);
+        assert_eq!(c.resources.memory, 4096);
+        assert_eq!(c.resources.disk, None);
+    }
+
+    #[test]
+    fn partial_resources_keep_defaults() {
+        let c = Config::parse("image = \"x\"\n[resources]\ncpu = 8\n").unwrap();
+        assert_eq!(c.resources.cpu, 8);
+        assert_eq!(c.resources.memory, 4096);
+    }
+
+    #[test]
+    fn mount_name_and_target_default_to_dir_name() {
+        let project = Project {
+            root: PathBuf::from("/tmp/myproj"),
+            config: Config::parse("image = \"x\"\n[[mount]]\nsource = \".\"\n").unwrap(),
+        };
+        let mounts = project.mounts().unwrap();
+        assert_eq!(mounts[0].name, "myproj");
+        assert_eq!(mounts[0].target, "/opt/myproj");
+    }
+
+    #[test]
     fn round_trips_through_toml() {
         let c = Config::parse(FULL).unwrap();
         let serialized = toml::to_string(&c).unwrap();
@@ -368,12 +461,19 @@ password = "admin"
         assert_eq!(c, again);
     }
 
+    fn project_with(config: &str) -> Project {
+        Project {
+            root: PathBuf::from("/tmp/proj"),
+            config: Config::parse(config).unwrap(),
+        }
+    }
+
     #[test]
     fn rejects_relative_mount_target() {
-        let err = Config::parse(
-            "image = \"x\"\n[[mount]]\nname=\"p\"\nsource=\".\"\ntarget=\"rel/path\"\n",
-        )
-        .unwrap_err();
+        let err =
+            project_with("image=\"x\"\n[[mount]]\nname=\"p\"\nsource=\".\"\ntarget=\"rel/path\"\n")
+                .mounts()
+                .unwrap_err();
         assert!(err.to_string().contains("absolute"));
     }
 
@@ -392,22 +492,24 @@ password = "admin"
 
     #[test]
     fn rejects_duplicate_mount_names() {
-        let err = Config::parse(
+        let err = project_with(
             "image=\"x\"\n\
              [[mount]]\nname=\"p\"\nsource=\".\"\ntarget=\"/a\"\n\
              [[mount]]\nname=\"p\"\nsource=\".\"\ntarget=\"/b\"\n",
         )
+        .mounts()
         .unwrap_err();
         assert!(err.to_string().contains("duplicate mount name"));
     }
 
     #[test]
     fn rejects_duplicate_mount_targets() {
-        let err = Config::parse(
+        let err = project_with(
             "image=\"x\"\n\
              [[mount]]\nname=\"p\"\nsource=\".\"\ntarget=\"/same\"\n\
              [[mount]]\nname=\"q\"\nsource=\".\"\ntarget=\"/same\"\n",
         )
+        .mounts()
         .unwrap_err();
         assert!(err.to_string().contains("duplicate mount target"));
     }

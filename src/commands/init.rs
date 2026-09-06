@@ -2,23 +2,32 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{CONFIG_FILE, Config};
+use crate::config::{CONFIG_FILE, Config, share_name_for};
 
-const TEMPLATE: &str = r#"# dirtbag sandbox configuration.
-# Docs: https://tart.run  —  run `dirtbag up` to build this VM.
+/// Build the starter config. `name`/`target` are filled from the project
+/// directory so the mount reads clearly, though both may be omitted (they
+/// default to the same values).
+fn template(share: &str) -> String {
+    format!(
+        r#"# dirtbag sandbox configuration. Run `dirtbag up` to build this VM.
 
+# Base image to clone. cirruslabs publishes Linux images (ubuntu, debian,
+# fedora) with version tags — see the available tags at
+# https://github.com/cirruslabs/tart/pkgs/container/ubuntu
 image = "ghcr.io/cirruslabs/ubuntu:latest"
 
-[resources]
-cpu    = 2
-memory = 4096   # MiB
-# disk = 50     # GiB (grow only)
+# Resources default to cpu = 2 and memory = 4096 (MiB); omit [resources] to
+# accept them. `disk` (GiB, grow-only) has no default.
+# [resources]
+# cpu    = 2
+# memory = 4096
+# disk   = 50
 
 # Share the project directory into the guest (live).
 [[mount]]
-name   = "project"
+name   = "{share}"
 source = "."
-target = "/opt/project"
+target = "/opt/{share}"
 
 # Copy a file in once at `up` time (not kept in sync).
 # Copy targets must be writable by the ssh user (copies run over SCP, no sudo).
@@ -32,10 +41,13 @@ target = "/opt/project"
 path       = "scripts/setup.sh"
 privileged = true
 
-[ssh]
-user     = "admin"
-password = "admin"
-"#;
+# SSH defaults to admin:admin (the Tart image default); omit [ssh] to accept it.
+# [ssh]
+# user     = "admin"
+# password = "admin"
+"#
+    )
+}
 
 const SETUP_SH: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -54,10 +66,11 @@ pub fn run() -> Result<()> {
         bail!("{CONFIG_FILE} already exists in {}", cwd.display());
     }
 
+    let contents = template(&share_name_for(&cwd));
     // Make sure the template is valid before you write it.
-    Config::parse(TEMPLATE).context("internal: init template failed to validate")?;
+    Config::parse(&contents).context("internal: init template failed to validate")?;
 
-    std::fs::write(&config_path, TEMPLATE)
+    std::fs::write(&config_path, &contents)
         .with_context(|| format!("writing {}", config_path.display()))?;
     write_if_absent(&cwd.join("scripts").join("setup.sh"), SETUP_SH)?;
 

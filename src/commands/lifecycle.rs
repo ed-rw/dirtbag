@@ -32,7 +32,7 @@ pub fn up() -> Result<()> {
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
-    for (mount, path) in project.missing_mount_sources() {
+    for (mount, path) in project.missing_mount_sources()? {
         warn!(mount = %mount, path = %path, "mount source does not exist on host");
     }
 
@@ -60,7 +60,7 @@ pub fn up() -> Result<()> {
     } else {
         std::fs::create_dir_all(project.dirtbag_dir())
             .with_context(|| format!("creating {}", project.dirtbag_dir().display()))?;
-        let args = run_args(&name, &project.dir_shares(), true);
+        let args = run_args(&name, &project.dir_shares()?, true);
         let pid = process::spawn_detached(tart.bin(), &args, &project.run_log())?;
         info!(vm = %name, pid, "started detached tart run");
         Some(pid)
@@ -91,7 +91,7 @@ fn configure_boot(project: &Project, ip: &str) -> Result<()> {
 
     // The guest loses its mounts on reboot, so mount the shares on every boot.
     let guest = crate::guest::detect(&project.config.image);
-    for m in &project.config.mounts {
+    for m in project.mounts()? {
         guest.mount_share(&ssh, &m.name, &m.target, m.readonly)?;
         info!(tag = %m.name, target = %m.target, "mounted share");
     }

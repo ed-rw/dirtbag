@@ -27,7 +27,7 @@ pub enum Command {
         cmd: Vec<String>,
     },
 
-    /// Show the VM's status (phase, name, IP).
+    /// Show the VM's status (name, state, IP).
     Status,
 
     /// Gracefully stop the VM.
