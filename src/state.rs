@@ -40,6 +40,9 @@ pub struct State {
     /// config drift and suggest `dirtbag reload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mounts_hash: Option<String>,
+    /// True after the provisioners run once. `on` provisions a VM one time.
+    #[serde(default)]
+    pub provisioned: bool,
 }
 
 impl State {
@@ -49,6 +52,7 @@ impl State {
             pid: None,
             phase: Phase::Absent,
             mounts_hash: None,
+            provisioned: false,
         }
     }
 

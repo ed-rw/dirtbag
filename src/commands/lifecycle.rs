@@ -83,17 +83,17 @@ pub fn on() -> Result<()> {
 
     let ip = wait_for_ip(&tart, &name, &state)?;
 
-    // Configure the guest only on first boot.
     if just_started {
-        configure_first_boot(&project, &ip)?;
+        configure_boot(&project, &ip, &mut state)?;
     }
 
     println!("VM `{name}` is up at {ip}");
     Ok(())
 }
 
-/// Wait for SSH, mount shares, copy files, and run provisioners.
-fn configure_first_boot(project: &Project, ip: &str) -> Result<()> {
+/// Configure the guest after a boot. Mount the shares every time. Copy files
+/// and run the provisioners only the first time.
+fn configure_boot(project: &Project, ip: &str, state: &mut State) -> Result<()> {
     info!(%ip, "waiting for ssh");
     let ssh = Ssh::connect_ready(
         ip,
@@ -103,13 +103,20 @@ fn configure_first_boot(project: &Project, ip: &str) -> Result<()> {
         SSH_TIMEOUT,
     )?;
 
+    // The guest loses its mounts on reboot, so mount the shares on every boot.
     let guest = crate::guest::detect(&project.config.image);
     for m in &project.config.mounts {
         guest.mount_share(&ssh, &m.name, &m.target, m.readonly)?;
         info!(tag = %m.name, target = %m.target, "mounted share");
     }
-    crate::provision::run_copies(&ssh, project)?;
-    crate::provision::run_provisions(&ssh, project)?;
+
+    // Provision a VM one time. Use `dirtbag provision` to run the steps again.
+    if !state.provisioned {
+        crate::provision::run_copies(&ssh, project)?;
+        crate::provision::run_provisions(&ssh, project)?;
+        state.provisioned = true;
+        state.save(&project.root)?;
+    }
     Ok(())
 }
 
@@ -162,6 +169,11 @@ pub fn stop() -> Result<()> {
         .context("no dirtbag state for this project; run `dirtbag on` first")?;
 
     if is_running(&tart, &state.vm_name)? {
+        // Tart stops the VM by a hard power-off, so flush the guest filesystem
+        // first. Otherwise unsynced writes from this session are lost.
+        if let Err(e) = sync_guest(&tart, &project, &state.vm_name) {
+            warn!("could not flush the guest before stop: {e:#}");
+        }
         info!(vm = %state.vm_name, "stopping");
         tart.stop(&state.vm_name).context("stopping VM")?;
     }
@@ -171,6 +183,22 @@ pub fn stop() -> Result<()> {
     state.phase = Phase::Stopped;
     state.save(&project.root)?;
     println!("VM `{}` stopped", state.vm_name);
+    Ok(())
+}
+
+/// Flush the guest filesystem over SSH so a hard power-off keeps the writes.
+fn sync_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
+    let ip = tart.ip(name)?.context("VM has no IP")?;
+    let ssh = Ssh::connect(
+        &ip,
+        SSH_PORT,
+        &project.config.ssh.user,
+        &project.config.ssh.password,
+    )?;
+    let (code, out) = ssh.exec_capture("sync")?;
+    if code != 0 {
+        bail!("guest `sync` failed (exit {code}): {}", out.trim());
+    }
     Ok(())
 }
 

@@ -104,3 +104,48 @@ fn e2e_on_ssh_destroy() {
     assert!(destroy.status.success());
     assert!(!dir.path().join(".dirtbag").exists());
 }
+
+/// A VM provisions one time. A stop then a restart re-mounts the shares but
+/// does not run the provisioners again.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_provision_runs_once_across_restarts() {
+    let dir = tempdir().unwrap();
+    // Each provisioner run appends one line to a guest file.
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
+         [resources]\ncpu = 2\nmemory = 2048\n\
+         [[mount]]\nname = \"project\"\nsource = \".\"\ntarget = \"/opt/project\"\n\
+         [[provision]]\nprivileged = true\ninline = '''\necho ran >> /etc/dirtbag-provisions\n'''\n",
+    )
+    .unwrap();
+
+    let count_runs = |dir: &std::path::Path| -> usize {
+        let out = run_in(dir, &["ssh", "--", "cat", "/etc/dirtbag-provisions"]);
+        assert!(out.status.success(), "cat failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).lines().count()
+    };
+
+    let first = run_in(dir.path(), &["on"]);
+    assert!(first.status.success(), "on failed: {}", String::from_utf8_lossy(&first.stderr));
+    assert_eq!(count_runs(dir.path()), 1, "provisioners should run once on first boot");
+
+    assert!(run_in(dir.path(), &["stop"]).status.success());
+
+    let second = run_in(dir.path(), &["on"]);
+    assert!(second.status.success(), "second on failed: {}", String::from_utf8_lossy(&second.stderr));
+
+    // The share is mounted again after the restart.
+    let ls = run_in(dir.path(), &["ssh", "--", "ls", "/opt/project/dirtbag.toml"]);
+    assert!(ls.status.success(), "mount missing after restart");
+
+    // The provisioners did not run a second time.
+    assert_eq!(count_runs(dir.path()), 1, "provisioners must not run again on restart");
+
+    // `dirtbag provision` runs them again on demand.
+    assert!(run_in(dir.path(), &["provision"]).status.success());
+    assert_eq!(count_runs(dir.path()), 2, "explicit provision should run the steps again");
+
+    assert!(run_in(dir.path(), &["destroy"]).status.success());
+}

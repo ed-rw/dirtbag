@@ -109,10 +109,10 @@ Notes:
 | Command | Description |
 |---|---|
 | `dirtbag init` | Scaffold a starter `dirtbag.toml` and `scripts/setup.sh`. |
-| `dirtbag on` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision. Re-running on a running VM is a no-op. |
+| `dirtbag on` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision (first boot only). Re-running on a running VM is a no-op. |
 | `dirtbag ssh [-- CMD…]` | Interactive shell, or run `CMD` in the VM (its exit status is propagated). |
 | `dirtbag status` | Show the VM's phase, name, IP, and process liveness. Outside a project, lists all Tart VMs. |
-| `dirtbag stop` | Gracefully stop the VM. |
+| `dirtbag stop` | Flush the guest filesystem, then stop the VM. |
 | `dirtbag reload` | Stop and bring the VM back on to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |
 | `dirtbag destroy` | Stop and delete the VM, and remove `.dirtbag/`. |
@@ -131,6 +131,12 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
 - **Access is over SSH** (libssh2). The same session handles the boot readiness
   probe, `ssh -- CMD`, the interactive PTY shell, SCP copy-in, and running
   provisioners.
+- **Provision once.** `on` runs the copies and provisioners only on a VM's first
+  boot; a flag in state records it. Later boots re-mount the shares but skip
+  provisioning. Use `dirtbag provision` to run the steps again.
+- **Stop flushes the guest.** `tart stop` is a hard power-off, so `dirtbag stop`
+  runs `sync` in the guest over SSH first. Without it, writes from the session
+  are lost on the next boot.
 - **Guests** implement a `Guest` trait so per-OS differences (e.g. Linux needing
   a manual virtiofs mount) live in one place.
 
