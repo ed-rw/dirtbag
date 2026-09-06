@@ -3,7 +3,7 @@
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::tart::{self, DirShare};
@@ -155,7 +155,10 @@ impl Config {
         for (i, p) in self.provisions.iter().enumerate() {
             match (&p.inline, &p.path) {
                 (Some(_), Some(_)) => {
-                    bail!("[[provision]] #{}: set only one of `inline` or `path`", i + 1)
+                    bail!(
+                        "[[provision]] #{}: set only one of `inline` or `path`",
+                        i + 1
+                    )
                 }
                 (None, None) => {
                     bail!("[[provision]] #{}: needs either `inline` or `path`", i + 1)
@@ -177,8 +180,12 @@ impl Project {
     /// Find the project. Search from `start` up through the parent directories
     /// for `dirtbag.toml`.
     pub fn discover(start: &Path) -> Result<Self> {
-        let path = find_config(start)
-            .with_context(|| format!("no {CONFIG_FILE} found in {} or any parent", start.display()))?;
+        let path = find_config(start).with_context(|| {
+            format!(
+                "no {CONFIG_FILE} found in {} or any parent",
+                start.display()
+            )
+        })?;
         let root = path
             .parent()
             .expect("config path has a parent")
@@ -260,13 +267,22 @@ fn derive_vm_name(root: &Path) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut hasher);
 
-    format!("dirtbag-{base}-{:08x}", (hasher.finish() & 0xffff_ffff) as u32)
+    format!(
+        "dirtbag-{base}-{:08x}",
+        (hasher.finish() & 0xffff_ffff) as u32
+    )
 }
 
 /// Keep `[A-Za-z0-9_-]`. Replace all other characters with `-`.
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -363,10 +379,8 @@ password = "admin"
 
     #[test]
     fn rejects_provision_with_both_inline_and_path() {
-        let err = Config::parse(
-            "image = \"x\"\n[[provision]]\ninline=\"echo\"\npath=\"s.sh\"\n",
-        )
-        .unwrap_err();
+        let err = Config::parse("image = \"x\"\n[[provision]]\ninline=\"echo\"\npath=\"s.sh\"\n")
+            .unwrap_err();
         assert!(err.to_string().contains("only one"));
     }
 
@@ -400,7 +414,12 @@ password = "admin"
 
     #[test]
     fn rejects_empty_image() {
-        assert!(Config::parse("image = \"\"").unwrap_err().to_string().contains("image"));
+        assert!(
+            Config::parse("image = \"\"")
+                .unwrap_err()
+                .to_string()
+                .contains("image")
+        );
     }
 
     #[test]
@@ -422,9 +441,10 @@ password = "admin"
         let name = project.vm_name();
         assert_eq!(name, project.vm_name());
         assert!(name.starts_with("dirtbag-"));
-        assert!(name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]
@@ -433,7 +453,10 @@ password = "admin"
             root: PathBuf::from("/tmp/proj"),
             config: Config::parse("image = \"x\"").unwrap(),
         };
-        assert_eq!(project.run_log(), PathBuf::from("/tmp/proj/.dirtbag/run.log"));
+        assert_eq!(
+            project.run_log(),
+            PathBuf::from("/tmp/proj/.dirtbag/run.log")
+        );
     }
 
     #[test]

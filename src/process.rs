@@ -1,8 +1,4 @@
 //! Start and track the detached `tart run` process.
-//!
-//! `tart run` stays in the foreground for the life of the VM. dirtbag starts it
-//! in a new session (`setsid`), sends its output to a log file, and records the
-//! PID. The process continues after `dirtbag on` returns.
 
 use std::fs::File;
 use std::os::unix::process::CommandExt;
@@ -16,8 +12,8 @@ use nix::unistd::Pid;
 /// Spawn `tart_bin` detached from the current session. Write stdout and stderr
 /// to `log_path`. Return the child PID.
 pub fn spawn_detached(tart_bin: &Path, args: &[String], log_path: &Path) -> Result<u32> {
-    let log = File::create(log_path)
-        .with_context(|| format!("creating log {}", log_path.display()))?;
+    let log =
+        File::create(log_path).with_context(|| format!("creating log {}", log_path.display()))?;
     let log_err = log.try_clone().context("duplicating log handle")?;
 
     let mut cmd = Command::new(tart_bin);

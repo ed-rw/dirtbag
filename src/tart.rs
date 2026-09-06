@@ -261,7 +261,10 @@ mod tests {
 
     #[test]
     fn clone_and_lifecycle_args() {
-        assert_eq!(clone_args("ghcr.io/x:latest", "vm1"), vec!["clone", "ghcr.io/x:latest", "vm1"]);
+        assert_eq!(
+            clone_args("ghcr.io/x:latest", "vm1"),
+            vec!["clone", "ghcr.io/x:latest", "vm1"]
+        );
         assert_eq!(stop_args("vm1"), vec!["stop", "vm1"]);
         assert_eq!(delete_args("vm1"), vec!["delete", "vm1"]);
         assert_eq!(list_args(), vec!["list", "--format", "json"]);

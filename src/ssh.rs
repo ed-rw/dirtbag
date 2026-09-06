@@ -1,15 +1,11 @@
 //! SSH access to the guest via libssh2 (`ssh2`).
-//!
-//! One mechanism does all of it: the readiness probe for `on`, command
-//! execution for `ssh -- CMD` and provisioning, and the interactive PTY shell.
-//! It authenticates with a password (Tart uses `admin`/`admin` by default).
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ssh2::Session;
 
 pub const SSH_PORT: u16 = 22;
@@ -84,7 +80,10 @@ impl Ssh {
         }
 
         let mut err = Vec::new();
-        channel.stderr().read_to_end(&mut err).context("reading stderr")?;
+        channel
+            .stderr()
+            .read_to_end(&mut err)
+            .context("reading stderr")?;
         std::io::stderr().write_all(&err)?;
 
         channel.wait_close().context("closing channel")?;
@@ -99,7 +98,10 @@ impl Ssh {
         let mut out = String::new();
         channel.read_to_string(&mut out).context("reading stdout")?;
         let mut err = String::new();
-        channel.stderr().read_to_string(&mut err).context("reading stderr")?;
+        channel
+            .stderr()
+            .read_to_string(&mut err)
+            .context("reading stderr")?;
         channel.wait_close().context("closing channel")?;
         out.push_str(&err);
         Ok((channel.exit_status()?, out))
@@ -109,7 +111,12 @@ impl Ssh {
     pub fn upload(&self, contents: &[u8], remote: &str, mode: i32) -> Result<()> {
         let mut ch = self
             .session
-            .scp_send(std::path::Path::new(remote), mode, contents.len() as u64, None)
+            .scp_send(
+                std::path::Path::new(remote),
+                mode,
+                contents.len() as u64,
+                None,
+            )
             .with_context(|| format!("scp to {remote}"))?;
         ch.write_all(contents)?;
         ch.send_eof()?;
@@ -175,14 +182,14 @@ impl Ssh {
             }
 
             // Apply terminal size changes.
-            if let Ok((c, r)) = crossterm::terminal::size() {
-                if (c, r) != (last_cols, last_rows) {
-                    self.session.set_blocking(true);
-                    let _ = channel.request_pty_size(c as u32, r as u32, None, None);
-                    self.session.set_blocking(false);
-                    last_cols = c;
-                    last_rows = r;
-                }
+            if let Ok((c, r)) = crossterm::terminal::size()
+                && (c, r) != (last_cols, last_rows)
+            {
+                self.session.set_blocking(true);
+                let _ = channel.request_pty_size(c as u32, r as u32, None, None);
+                self.session.set_blocking(false);
+                last_cols = c;
+                last_rows = r;
             }
 
             std::thread::sleep(Duration::from_millis(10));
@@ -217,7 +224,7 @@ struct NonBlockingStdin {
 
 impl NonBlockingStdin {
     fn enable() -> Self {
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
         let fd = std::io::stdin().as_raw_fd();
         // SAFETY: fd 0 (stdin) is valid for the life of the process.
         let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };

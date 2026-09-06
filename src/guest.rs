@@ -5,7 +5,7 @@
 //! the [`Guest`] trait, so you can add guest types without other changes. Linux
 //! is first.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::ssh::Ssh;
 
@@ -44,7 +44,10 @@ sudo mount -t virtiofs{ro} "{tag}" "{target}""#
         );
         let (code, out) = ssh.exec_capture(&script)?;
         if code != 0 {
-            bail!("mounting `{tag}` at {target} failed (exit {code}): {}", out.trim());
+            bail!(
+                "mounting `{tag}` at {target} failed (exit {code}): {}",
+                out.trim()
+            );
         }
         Ok(())
     }
@@ -61,7 +64,10 @@ sudo mount -t virtiofs{ro} "{tag}" "{target}""#
         );
         let (code, out) = ssh.exec_capture(&script)?;
         if code != 0 {
-            bail!("could not record provisioning (exit {code}): {}", out.trim());
+            bail!(
+                "could not record provisioning (exit {code}): {}",
+                out.trim()
+            );
         }
         Ok(())
     }

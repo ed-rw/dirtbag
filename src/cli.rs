@@ -18,7 +18,7 @@ pub enum Command {
     Init,
 
     /// Create and start the VM: clone, configure, run, mount, copy, provision.
-    On,
+    Up,
 
     /// Open an interactive shell in the VM, or run a command in it.
     Ssh {
@@ -31,9 +31,9 @@ pub enum Command {
     Status,
 
     /// Gracefully stop the VM.
-    Stop,
+    Down,
 
-    /// Restart the VM to apply mount/resource changes (stop + on).
+    /// Restart the VM to apply mount/resource changes (down + up).
     Reload,
 
     /// Stop and delete the VM and its local state.

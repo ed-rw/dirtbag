@@ -1,6 +1,6 @@
 //! File copy-in and provisioning over SSH.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use tracing::info;
 

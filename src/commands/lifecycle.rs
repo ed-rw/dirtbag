@@ -1,4 +1,4 @@
-//! VM lifecycle commands: `on`, `status`, `stop`, `reload`, `destroy`.
+//! VM lifecycle commands: `up`, `status`, `down`, `reload`, `destroy`.
 //!
 //! dirtbag keeps no host-side state file. Tart is the source of truth for
 //! whether a VM exists and is running; the guest records whether it has been
@@ -7,13 +7,13 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::config::Project;
 use crate::process;
-use crate::ssh::{Ssh, SSH_PORT};
-use crate::tart::{run_args, Tart};
+use crate::ssh::{SSH_PORT, Ssh};
+use crate::tart::{Tart, run_args};
 
 const IP_TIMEOUT: Duration = Duration::from_secs(180);
 const SSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -27,7 +27,7 @@ fn is_running(tart: &Tart, name: &str) -> Result<bool> {
     Ok(tart.get(name)?.map(|v| v.running).unwrap_or(false))
 }
 
-pub fn on() -> Result<()> {
+pub fn up() -> Result<()> {
     let project = discover()?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
@@ -42,7 +42,8 @@ pub fn on() -> Result<()> {
             .with_context(|| format!("cloning {} to {name}", project.config.image))?;
         // Give the VM a unique MAC. `tart ip` resolves by MAC, so two clones of
         // the same image would otherwise get the same IP and shadow each other.
-        tart.set_random_mac(&name).context("assigning a unique MAC")?;
+        tart.set_random_mac(&name)
+            .context("assigning a unique MAC")?;
     }
 
     // Tart accepts resource changes only while the VM is stopped.
@@ -104,11 +105,11 @@ fn configure_boot(project: &Project, ip: &str) -> Result<()> {
     Ok(())
 }
 
-/// `dirtbag reload` — stop the VM (if running) and bring it back on so mount and
+/// `dirtbag reload` — bring the VM down (if running) and back up so mount and
 /// resource changes take effect.
 pub fn reload() -> Result<()> {
-    stop()?;
-    on()
+    down()?;
+    up()
 }
 
 fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
@@ -118,19 +119,22 @@ fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
             return Ok(ip);
         }
         // Stop early if the VM process we started has died.
-        if let Some(pid) = pid {
-            if !process::is_alive(pid) {
-                bail!("tart run (pid {pid}) exited before the VM got an IP; see .dirtbag/run.log");
-            }
+        if let Some(pid) = pid
+            && !process::is_alive(pid)
+        {
+            bail!("tart run (pid {pid}) exited before the VM got an IP; see .dirtbag/run.log");
         }
         if start.elapsed() > IP_TIMEOUT {
-            bail!("timed out after {}s waiting for `{name}` to get an IP", IP_TIMEOUT.as_secs());
+            bail!(
+                "timed out after {}s waiting for `{name}` to get an IP",
+                IP_TIMEOUT.as_secs()
+            );
         }
         std::thread::sleep(POLL_INTERVAL);
     }
 }
 
-pub fn stop() -> Result<()> {
+pub fn down() -> Result<()> {
     let project = discover()?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
@@ -143,7 +147,7 @@ pub fn stop() -> Result<()> {
         }
         info!(vm = %name, "stopping");
         tart.stop(&name).context("stopping VM")?;
-        println!("VM `{name}` stopped");
+        println!("VM `{name}` is down");
     } else {
         println!("VM `{name}` is not running");
     }
@@ -201,16 +205,16 @@ fn project_status(project: &Project) -> Result<()> {
     let tart = Tart::locate()?;
     let name = project.vm_name();
     let Some(vm) = tart.get(&name)? else {
-        println!("not created — run `dirtbag on`");
+        println!("not created — run `dirtbag up`");
         return Ok(());
     };
 
     println!("name:  {name}");
     println!("state: {}", vm.state);
-    if vm.running {
-        if let Some(ip) = tart.ip(&name)? {
-            println!("ip:    {ip}");
-        }
+    if vm.running
+        && let Some(ip) = tart.ip(&name)?
+    {
+        println!("ip:    {ip}");
     }
     Ok(())
 }

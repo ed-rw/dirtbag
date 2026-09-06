@@ -28,7 +28,14 @@ fn help_lists_all_commands() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     for cmd in [
-        "init", "on", "ssh", "status", "stop", "reload", "destroy", "provision",
+        "init",
+        "up",
+        "ssh",
+        "status",
+        "down",
+        "reload",
+        "destroy",
+        "provision",
     ] {
         assert!(text.contains(cmd), "help missing `{cmd}`:\n{text}");
     }
@@ -49,9 +56,9 @@ fn init_scaffolds_then_refuses_overwrite() {
 }
 
 #[test]
-fn on_without_config_reports_missing_toml() {
+fn up_without_config_reports_missing_toml() {
     let dir = tempdir().unwrap();
-    let out = run_in(dir.path(), &["on"]);
+    let out = run_in(dir.path(), &["up"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag.toml"));
 }
@@ -61,7 +68,11 @@ fn status_in_fresh_project_reports_not_created() {
     let dir = tempdir().unwrap();
     run_in(dir.path(), &["init"]);
     let out = run_in(dir.path(), &["status"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("not created"));
 }
 
@@ -71,14 +82,14 @@ fn ssh_without_state_reports_no_state() {
     run_in(dir.path(), &["init"]);
     let out = run_in(dir.path(), &["ssh", "--", "true"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag on"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag up"));
 }
 
 /// Full lifecycle against a real VM. Ignored by default; needs tart + a Linux
 /// image pull + Local Network permission.
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
-fn e2e_on_ssh_destroy() {
+fn e2e_up_ssh_destroy() {
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("dirtbag.toml"),
@@ -89,15 +100,22 @@ fn e2e_on_ssh_destroy() {
     )
     .unwrap();
 
-    let on = run_in(dir.path(), &["on"]);
-    assert!(on.status.success(), "on failed: {}", String::from_utf8_lossy(&on.stderr));
+    let up = run_in(dir.path(), &["up"]);
+    assert!(
+        up.status.success(),
+        "up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
 
     // Provisioning ran.
     let jq = run_in(dir.path(), &["ssh", "--", "jq", "--version"]);
     assert!(jq.status.success());
 
     // Mount is live.
-    let ls = run_in(dir.path(), &["ssh", "--", "ls", "/opt/project/dirtbag.toml"]);
+    let ls = run_in(
+        dir.path(),
+        &["ssh", "--", "ls", "/opt/project/dirtbag.toml"],
+    );
     assert!(ls.status.success());
 
     let destroy = run_in(dir.path(), &["destroy"]);
@@ -105,7 +123,7 @@ fn e2e_on_ssh_destroy() {
     assert!(!dir.path().join(".dirtbag").exists());
 }
 
-/// A VM provisions one time. A stop then a restart re-mounts the shares but
+/// A VM provisions one time. A down then a restart re-mounts the shares but
 /// does not run the provisioners again.
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
@@ -123,29 +141,56 @@ fn e2e_provision_runs_once_across_restarts() {
 
     let count_runs = |dir: &std::path::Path| -> usize {
         let out = run_in(dir, &["ssh", "--", "cat", "/etc/dirtbag-provisions"]);
-        assert!(out.status.success(), "cat failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "cat failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).lines().count()
     };
 
-    let first = run_in(dir.path(), &["on"]);
-    assert!(first.status.success(), "on failed: {}", String::from_utf8_lossy(&first.stderr));
-    assert_eq!(count_runs(dir.path()), 1, "provisioners should run once on first boot");
+    let first = run_in(dir.path(), &["up"]);
+    assert!(
+        first.status.success(),
+        "up failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        count_runs(dir.path()),
+        1,
+        "provisioners should run once on first boot"
+    );
 
-    assert!(run_in(dir.path(), &["stop"]).status.success());
+    assert!(run_in(dir.path(), &["down"]).status.success());
 
-    let second = run_in(dir.path(), &["on"]);
-    assert!(second.status.success(), "second on failed: {}", String::from_utf8_lossy(&second.stderr));
+    let second = run_in(dir.path(), &["up"]);
+    assert!(
+        second.status.success(),
+        "second up failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
 
     // The share is mounted again after the restart.
-    let ls = run_in(dir.path(), &["ssh", "--", "ls", "/opt/project/dirtbag.toml"]);
+    let ls = run_in(
+        dir.path(),
+        &["ssh", "--", "ls", "/opt/project/dirtbag.toml"],
+    );
     assert!(ls.status.success(), "mount missing after restart");
 
     // The provisioners did not run a second time.
-    assert_eq!(count_runs(dir.path()), 1, "provisioners must not run again on restart");
+    assert_eq!(
+        count_runs(dir.path()),
+        1,
+        "provisioners must not run again on restart"
+    );
 
     // `dirtbag provision` runs them again on demand.
     assert!(run_in(dir.path(), &["provision"]).status.success());
-    assert_eq!(count_runs(dir.path()), 2, "explicit provision should run the steps again");
+    assert_eq!(
+        count_runs(dir.path()),
+        2,
+        "explicit provision should run the steps again"
+    );
 
     assert!(run_in(dir.path(), &["destroy"]).status.success());
 }
