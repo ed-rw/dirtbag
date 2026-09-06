@@ -85,6 +85,10 @@ pub fn set_args(name: &str, res: &Resources) -> Vec<String> {
     a
 }
 
+pub fn random_mac_args(name: &str) -> Vec<String> {
+    vec!["set".into(), name.into(), "--random-mac".into()]
+}
+
 /// Build one `--dir=...` flag for a share.
 ///
 /// The flag sets a per-share `tag=<name>` and uses no name prefix. A name
@@ -185,6 +189,12 @@ impl Tart {
         self.checked(&set_args(name, res)).map(drop)
     }
 
+    /// Assign a new random MAC. `tart ip` resolves by MAC, so a unique MAC keeps
+    /// clones of the same image from shadowing each other on the network.
+    pub fn set_random_mac(&self, name: &str) -> Result<(), TartError> {
+        self.checked(&random_mac_args(name)).map(drop)
+    }
+
     pub fn stop(&self, name: &str) -> Result<(), TartError> {
         self.checked(&stop_args(name)).map(drop)
     }
@@ -242,6 +252,11 @@ mod tests {
             set_args("vm1", &res),
             vec!["set", "vm1", "--cpu", "4", "--disk-size", "50"]
         );
+    }
+
+    #[test]
+    fn random_mac_args_build() {
+        assert_eq!(random_mac_args("vm1"), vec!["set", "vm1", "--random-mac"]);
     }
 
     #[test]

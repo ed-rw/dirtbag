@@ -53,6 +53,9 @@ pub fn on() -> Result<()> {
         info!(image = %project.config.image, vm = %name, "cloning base image");
         tart.clone(&project.config.image, &name)
             .with_context(|| format!("cloning {} to {name}", project.config.image))?;
+        // Give the VM a unique MAC. `tart ip` resolves by MAC, so two clones of
+        // the same image would otherwise get the same IP and shadow each other.
+        tart.set_random_mac(&name).context("assigning a unique MAC")?;
         state.phase = Phase::Created;
         state.save(&project.root)?;
     }
