@@ -159,8 +159,7 @@ pub fn down() -> Result<()> {
 }
 
 /// Wind the guest down over SSH before a stop. Run the `[[on-shutdown]]` steps,
-/// then always `sync` so a hard power-off keeps the writes. A failed step is
-/// logged, not fatal — the sync must still run.
+/// the last of which is always `sync`, so a hard power-off keeps the writes.
 fn shutdown_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
     let ip = tart.ip(name)?.context("VM has no IP")?;
     let ssh = Ssh::connect(
@@ -169,14 +168,7 @@ fn shutdown_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
         &project.config.ssh.user,
         &project.config.ssh.password,
     )?;
-    if let Err(e) = crate::provision::run_on_shutdown(&ssh, project) {
-        warn!("on-shutdown step failed: {e:#}");
-    }
-    let (code, out) = ssh.exec_capture("sync")?;
-    if code != 0 {
-        bail!("guest `sync` failed (exit {code}): {}", out.trim());
-    }
-    Ok(())
+    crate::provision::run_on_shutdown(&ssh, project)
 }
 
 pub fn destroy() -> Result<()> {

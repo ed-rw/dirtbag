@@ -187,10 +187,26 @@ impl Config {
         validate_steps(&self.on_shutdowns, "on-shutdown")?;
         Ok(())
     }
+
+    /// The on-shutdown steps to run, with the always-last `sync` appended.
+    ///
+    /// `sync` flushes the guest filesystem so a hard power-off keeps the writes.
+    /// It is a plain step, so it runs like any other and is skipped if an earlier
+    /// step fails.
+    pub fn on_shutdown_steps(&self) -> Vec<Step> {
+        let mut steps = self.on_shutdowns.clone();
+        steps.push(Step {
+            inline: Some("sync".to_string()),
+            path: None,
+            shell: None,
+            privileged: false,
+        });
+        steps
+    }
 }
 
 /// Each step needs exactly one of `inline` or `path`. `label` names the config
-/// section in error messages (`provision` or `on-boot`).
+/// section in error messages.
 fn validate_steps(steps: &[Step], label: &str) -> Result<()> {
     for (i, s) in steps.iter().enumerate() {
         match (&s.inline, &s.path) {
@@ -555,6 +571,22 @@ password = "admin"
     fn on_shutdowns_default_empty() {
         let c = Config::parse("image = \"x\"").unwrap();
         assert!(c.on_shutdowns.is_empty());
+    }
+
+    #[test]
+    fn on_shutdown_steps_append_sync() {
+        let c = Config::parse("image=\"x\"\n[[on-shutdown]]\ninline=\"echo bye\"\n").unwrap();
+        let steps = c.on_shutdown_steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].inline.as_deref(), Some("echo bye"));
+        assert_eq!(steps[1].inline.as_deref(), Some("sync"));
+    }
+
+    #[test]
+    fn on_shutdown_steps_are_just_sync_by_default() {
+        let steps = Config::parse("image=\"x\"").unwrap().on_shutdown_steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].inline.as_deref(), Some("sync"));
     }
 
     #[test]

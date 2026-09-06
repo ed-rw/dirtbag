@@ -167,9 +167,10 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
   dirtbag drives (`up` on a stopped VM, and `reload`), after provisioning. Use
   them to start services or agents the sandbox needs to be usable.
 - **Down winds the guest down.** `tart stop` is a hard power-off, so before it
-  `dirtbag down` runs the `[[on-shutdown]]` steps over SSH and then always
-  `sync`. Without the sync, writes from the session are lost on the next boot; a
-  failed on-shutdown step is logged but does not block the sync or the stop.
+  `dirtbag down` runs the `[[on-shutdown]]` steps over SSH. The last step is
+  always an implicit `sync`; without it, writes from the session are lost on the
+  next boot. The steps are best-effort — a failure is logged and the VM still
+  stops — so a failing earlier step aborts the run before `sync`.
 - **Guests** implement a `Guest` trait so per-OS differences (e.g. Linux needing
   a manual virtiofs mount) live in one place.
 

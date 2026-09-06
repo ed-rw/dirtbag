@@ -29,9 +29,15 @@ pub fn run_on_boot(ssh: &Ssh, project: &Project) -> Result<()> {
     run_steps(ssh, project, &project.config.on_boots, "on-boot")
 }
 
-/// Run each `[[on-shutdown]]` step in order. Stop at the first non-zero exit.
+/// Run each `[[on-shutdown]]` step in order, ending with the implicit `sync`.
+/// Stop at the first non-zero exit.
 pub fn run_on_shutdown(ssh: &Ssh, project: &Project) -> Result<()> {
-    run_steps(ssh, project, &project.config.on_shutdowns, "on-shutdown")
+    run_steps(
+        ssh,
+        project,
+        &project.config.on_shutdown_steps(),
+        "on-shutdown",
+    )
 }
 
 /// Run a list of script steps in order over SSH. `label` names the section in
