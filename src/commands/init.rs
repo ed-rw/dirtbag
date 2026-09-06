@@ -54,7 +54,7 @@ pub fn run() -> Result<()> {
         bail!("{CONFIG_FILE} already exists in {}", cwd.display());
     }
 
-    // Sanity-check the template stays valid as the schema evolves.
+    // Make sure the template is valid before you write it.
     Config::parse(TEMPLATE).context("internal: init template failed to validate")?;
 
     std::fs::write(&config_path, TEMPLATE)

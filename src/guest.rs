@@ -1,9 +1,9 @@
 //! Guest-OS abstraction.
 //!
-//! Tart shares directories over virtiofs, but the guest-side handling differs
-//! per OS (Linux must mount manually; macOS auto-mounts). Lifecycle code talks
-//! to a [`Guest`] so new guest types slot in without changes elsewhere. Linux
-//! ships first.
+//! Tart shares directories over virtiofs. The guest side differs per OS: Linux
+//! mounts a share manually; macOS mounts it automatically. Lifecycle code uses
+//! the [`Guest`] trait, so you can add guest types without other changes. Linux
+//! is first.
 
 use anyhow::{bail, Result};
 
@@ -14,8 +14,8 @@ pub trait Guest {
     fn mount_share(&self, ssh: &Ssh, tag: &str, target: &str, readonly: bool) -> Result<()>;
 }
 
-/// Pick a guest implementation for an image. Linux-only for now; the image ref
-/// is where macOS/other detection will hook in later.
+/// Pick a guest for an image. Linux only for now. Later, use the image ref to
+/// detect macOS and other guests.
 pub fn detect(_image: &str) -> Box<dyn Guest> {
     Box::new(LinuxGuest)
 }
@@ -25,7 +25,7 @@ pub struct LinuxGuest;
 impl Guest for LinuxGuest {
     fn mount_share(&self, ssh: &Ssh, tag: &str, target: &str, readonly: bool) -> Result<()> {
         let ro = if readonly { " -o ro" } else { "" };
-        // Idempotent: create the mount point, skip if already mounted.
+        // Make the mount point. Skip the mount if it is already mounted.
         let script = format!(
             r#"set -e
 sudo mkdir -p "{target}"

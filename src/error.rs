@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Errors originating from the `tart` CLI wrapper.
+/// Errors from the `tart` CLI wrapper.
 #[derive(Debug, Error)]
 pub enum TartError {
     #[error("`tart` binary not found on PATH; install it with `brew install cirruslabs/cli/tart`")]

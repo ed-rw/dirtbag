@@ -1,8 +1,8 @@
 //! SSH access to the guest via libssh2 (`ssh2`).
 //!
-//! One mechanism handles everything: a readiness probe used by `on`, streaming
-//! command execution for `ssh -- CMD` and provisioning, and an interactive PTY
-//! shell. Authentication is by password (Tart's `admin`/`admin` by default).
+//! One mechanism does all of it: the readiness probe for `on`, command
+//! execution for `ssh -- CMD` and provisioning, and the interactive PTY shell.
+//! It authenticates with a password (Tart uses `admin`/`admin` by default).
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -41,8 +41,8 @@ impl Ssh {
         Ok(Self { session })
     }
 
-    /// Retry [`Ssh::connect`] until it succeeds or `timeout` elapses. Used to
-    /// wait for a freshly booted VM to accept logins.
+    /// Retry [`Ssh::connect`] until it succeeds or `timeout` elapses. Use it to
+    /// wait for a new VM to accept logins.
     pub fn connect_ready(
         host: &str,
         port: u16,
@@ -66,8 +66,8 @@ impl Ssh {
         }
     }
 
-    /// Run `command`, streaming stdout/stderr to the terminal. Returns the
-    /// remote exit status.
+    /// Run `command`. Send stdout and stderr to the terminal. Return the remote
+    /// exit status.
     pub fn exec_streaming(&self, command: &str) -> Result<i32> {
         let mut channel = self.session.channel_session().context("opening channel")?;
         channel.exec(command).context("exec")?;
@@ -91,7 +91,7 @@ impl Ssh {
         Ok(channel.exit_status()?)
     }
 
-    /// Run `command`, capturing combined stdout+stderr. Returns
+    /// Run `command`. Capture stdout and stderr together. Return
     /// `(exit_status, output)`.
     pub fn exec_capture(&self, command: &str) -> Result<(i32, String)> {
         let mut channel = self.session.channel_session().context("opening channel")?;
@@ -119,7 +119,7 @@ impl Ssh {
         Ok(())
     }
 
-    /// Open an interactive PTY shell wired to the local terminal. Returns the
+    /// Open an interactive PTY shell connected to the local terminal. Return the
     /// shell's exit status.
     pub fn shell(&self) -> Result<i32> {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -144,7 +144,7 @@ impl Ssh {
         let (mut last_cols, mut last_rows) = (cols, rows);
 
         let status = loop {
-            // Guest -> local terminal.
+            // Copy guest output to the terminal.
             match channel.read(&mut chan_buf) {
                 Ok(0) => {
                     if channel.eof() {
@@ -154,13 +154,13 @@ impl Ssh {
                 Ok(n) => {
                     stdout.write_all(&chan_buf[..n])?;
                     stdout.flush()?;
-                    continue; // drain the guest before sleeping
+                    continue; // Read all guest output before you sleep.
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e).context("reading from guest"),
             }
 
-            // Local keyboard -> guest.
+            // Send keyboard input to the guest.
             match stdin.read(&mut in_buf) {
                 Ok(0) => {}
                 Ok(n) => {
@@ -174,7 +174,7 @@ impl Ssh {
                 Err(e) => return Err(e).context("reading stdin"),
             }
 
-            // Propagate terminal resizes.
+            // Apply terminal size changes.
             if let Ok((c, r)) = crossterm::terminal::size() {
                 if (c, r) != (last_cols, last_rows) {
                     self.session.set_blocking(true);

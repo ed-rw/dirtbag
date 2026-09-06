@@ -19,7 +19,7 @@ fn discover() -> Result<Project> {
     Project::discover_cwd()
 }
 
-/// Resolve (and persist on first use) the VM name for a project.
+/// Load the project state, or make a new one with a resolved VM name.
 fn load_or_init_state(project: &Project) -> Result<State> {
     if let Some(state) = State::load(&project.root)? {
         return Ok(state);
@@ -42,7 +42,6 @@ pub fn on() -> Result<()> {
     let mut state = load_or_init_state(&project)?;
     let name = state.vm_name.clone();
 
-    // Warn about mount sources that don't exist — Tart requires them to.
     for (mount, path) in project.missing_mount_sources() {
         warn!(mount = %mount, path = %path, "mount source does not exist on host");
     }
@@ -50,7 +49,6 @@ pub fn on() -> Result<()> {
     let dirs = project.dir_shares();
     let fingerprint = mounts_fingerprint(&dirs);
 
-    // 1. Clone from the base image if the VM doesn't exist yet.
     if tart.get(&name)?.is_none() {
         info!(image = %project.config.image, vm = %name, "cloning base image");
         tart.clone(&project.config.image, &name)
@@ -59,16 +57,14 @@ pub fn on() -> Result<()> {
         state.save(&project.root)?;
     }
 
-    // 2. Apply resource settings (only valid while stopped).
+    // Tart accepts resource changes only while the VM is stopped.
     if !is_running(&tart, &name)? {
         tart.set(&name, &project.config.resources.to_tart())
             .context("applying resource settings")?;
     }
 
-    // 3. Start the VM detached, unless tart already reports it running.
     let just_started = if is_running(&tart, &name)? {
-        // Mounts are fixed at `tart run` time; if they changed, a reload is
-        // needed to reattach them.
+        // Tart fixes the mounts at run time. A reload reattaches changed mounts.
         if state.mounts_hash.as_deref().is_some_and(|h| h != fingerprint) {
             warn!("mount configuration changed since boot — run `dirtbag reload` to apply");
         }
@@ -85,37 +81,40 @@ pub fn on() -> Result<()> {
         true
     };
 
-    // 4. Wait for the VM to obtain an IP.
     let ip = wait_for_ip(&tart, &name, &state)?;
 
-    // 5. On first boot only: wait for SSH, mount shares, copy files, provision.
-    // Re-running `on` on an already-running VM is a no-op (use `dirtbag reload`
-    // to reattach changed mounts, or `dirtbag provision` to re-provision).
+    // Configure the guest only on first boot.
     if just_started {
-        info!(vm = %name, %ip, "waiting for ssh");
-        let ssh = Ssh::connect_ready(
-            &ip,
-            SSH_PORT,
-            &project.config.ssh.user,
-            &project.config.ssh.password,
-            SSH_TIMEOUT,
-        )?;
-
-        let guest = crate::guest::detect(&project.config.image);
-        for m in &project.config.mounts {
-            guest.mount_share(&ssh, &m.name, &m.target, m.readonly)?;
-            info!(tag = %m.name, target = %m.target, "mounted share");
-        }
-        crate::provision::run_copies(&ssh, &project)?;
-        crate::provision::run_provisions(&ssh, &project)?;
+        configure_first_boot(&project, &ip)?;
     }
 
     println!("VM `{name}` is up at {ip}");
     Ok(())
 }
 
-/// A stable fingerprint of the mount set, order-independent, used to detect
-/// when a running VM's shares no longer match the config.
+/// Wait for SSH, mount shares, copy files, and run provisioners.
+fn configure_first_boot(project: &Project, ip: &str) -> Result<()> {
+    info!(%ip, "waiting for ssh");
+    let ssh = Ssh::connect_ready(
+        ip,
+        SSH_PORT,
+        &project.config.ssh.user,
+        &project.config.ssh.password,
+        SSH_TIMEOUT,
+    )?;
+
+    let guest = crate::guest::detect(&project.config.image);
+    for m in &project.config.mounts {
+        guest.mount_share(&ssh, &m.name, &m.target, m.readonly)?;
+        info!(tag = %m.name, target = %m.target, "mounted share");
+    }
+    crate::provision::run_copies(&ssh, project)?;
+    crate::provision::run_provisions(&ssh, project)?;
+    Ok(())
+}
+
+/// Order-independent fingerprint of the mount set. It shows when a running VM
+/// no longer matches the config.
 fn mounts_fingerprint(dirs: &[DirShare]) -> String {
     use std::hash::{Hash, Hasher};
     let mut flags: Vec<String> = dirs.iter().map(dir_flag).collect();
@@ -141,7 +140,7 @@ fn wait_for_ip(tart: &Tart, name: &str, state: &State) -> Result<String> {
         if let Some(ip) = tart.ip(name)? {
             return Ok(ip);
         }
-        // If we own the process and it died, fail fast with the log hint.
+        // Stop early if our tart process is dead.
         if let Some(pid) = state.pid {
             if !process::is_alive(pid) {
                 bail!(

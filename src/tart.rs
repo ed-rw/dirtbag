@@ -1,8 +1,7 @@
-//! Thin wrapper around the `tart` CLI.
+//! Wrapper around the `tart` CLI.
 //!
-//! Pure argument-building and output-parsing functions live at module scope so
-//! they can be unit-tested without a real `tart` binary or VM. The [`Tart`]
-//! struct pairs those with process execution.
+//! The argument builders and output parsers are free functions. You can test
+//! them without tart or a VM. The [`Tart`] struct runs the commands.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,9 +10,8 @@ use serde::Deserialize;
 
 use crate::error::TartError;
 
-/// A VM as reported by `tart list --format json`.
-///
-/// Extra fields in the JSON (Disk, Size, Accessed, …) are ignored.
+/// A VM from `tart list --format json`. serde ignores the other JSON fields
+/// (Disk, Size, Accessed, …).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Vm {
@@ -49,10 +47,6 @@ impl Resources {
         self.cpu.is_none() && self.memory_mib.is_none() && self.disk_gb.is_none()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Pure argument builders (unit-tested)
-// ---------------------------------------------------------------------------
 
 pub fn list_args() -> Vec<String> {
     vec!["list".into(), "--format".into(), "json".into()]
@@ -91,12 +85,12 @@ pub fn set_args(name: &str, res: &Resources) -> Vec<String> {
     a
 }
 
-/// Build a single `--dir=...` flag value for a share.
+/// Build one `--dir=...` flag for a share.
 ///
-/// The share is given a per-share `tag=<name>` and **no name prefix**: a name
-/// prefix would make Tart expose the files under a subdirectory of that name,
-/// whereas we want the share's contents mounted directly at the guest target
-/// via `mount -t virtiofs <tag> <target>`.
+/// The flag sets a per-share `tag=<name>` and uses no name prefix. A name
+/// prefix makes Tart put the files in a subdirectory with that name. Without a
+/// prefix, the guest mounts the share contents directly at the target with
+/// `mount -t virtiofs <tag> <target>`.
 pub fn dir_flag(share: &DirShare) -> String {
     let mut opts = Vec::new();
     if share.readonly {
@@ -118,20 +112,12 @@ pub fn run_args(name: &str, dirs: &[DirShare], no_graphics: bool) -> Vec<String>
     a
 }
 
-// ---------------------------------------------------------------------------
-// Pure output parsing (unit-tested)
-// ---------------------------------------------------------------------------
-
 pub fn parse_list(json: &str) -> Result<Vec<Vm>, TartError> {
     serde_json::from_str(json).map_err(|source| TartError::Parse {
         cmd: "list".into(),
         source,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Execution
-// ---------------------------------------------------------------------------
 
 /// A located `tart` executable.
 #[derive(Debug, Clone)]
@@ -146,7 +132,6 @@ impl Tart {
         Ok(Self { bin })
     }
 
-    /// The resolved path to the `tart` binary.
     pub fn bin(&self) -> &PathBuf {
         &self.bin
     }
@@ -156,7 +141,7 @@ impl Tart {
         Ok(Command::new(&self.bin).args(args).output()?)
     }
 
-    /// Run a command, returning stdout on success or a [`TartError::Command`].
+    /// Run a command. Return stdout, or a [`TartError::Command`] on failure.
     fn checked(&self, args: &[String]) -> Result<String, TartError> {
         let out = self.output(args)?;
         if !out.status.success() {
@@ -178,9 +163,8 @@ impl Tart {
         Ok(self.list()?.into_iter().find(|v| v.name == name))
     }
 
-    /// Resolve a VM's IP. Returns `Ok(None)` when the VM is stopped or has no
-    /// DHCP lease yet (tart exits non-zero in that case, which is not an error
-    /// for our purposes).
+    /// Get a VM's IP. Return `Ok(None)` when the VM is stopped or has no DHCP
+    /// lease yet. Tart exits non-zero in that case, which is not an error here.
     pub fn ip(&self, name: &str) -> Result<Option<String>, TartError> {
         let out = self.output(&ip_args(name))?;
         if !out.status.success() {

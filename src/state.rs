@@ -36,8 +36,8 @@ pub struct State {
     pub pid: Option<u32>,
     #[serde(default)]
     pub phase: Phase,
-    /// Fingerprint of the mount set the VM was last booted with, so `on` can
-    /// detect config drift and suggest `dirtbag reload`.
+    /// Fingerprint of the mount set from the last boot. `on` uses it to detect
+    /// config drift and suggest `dirtbag reload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mounts_hash: Option<String>,
 }
@@ -64,7 +64,7 @@ impl State {
         Ok(Some(state))
     }
 
-    /// Persist state to `<root>/.dirtbag/state.toml`, creating the dir.
+    /// Save state to `<root>/.dirtbag/state.toml`. Make the directory if needed.
     pub fn save(&self, root: &Path) -> Result<()> {
         let dir = state_dir(root);
         std::fs::create_dir_all(&dir)
@@ -88,11 +88,11 @@ pub fn run_log(root: &Path) -> PathBuf {
     state_dir(root).join(RUN_LOG)
 }
 
-/// Derive a stable VM name from a project directory: `dirtbag-<dir>-<hash>`.
+/// Make a stable VM name from a project directory: `dirtbag-<dir>-<hash>`.
 ///
-/// The hash keeps names unique across identically-named directories. Once
-/// resolved it is persisted in state, so it is stable for the project's life
-/// regardless of future changes to this function.
+/// The hash keeps names unique across directories with the same name. dirtbag
+/// saves the name in state after the first use. The name then stays the same
+/// for the life of the project, even if this function changes later.
 pub fn default_vm_name(root: &Path) -> String {
     let base = root
         .file_name()
@@ -108,7 +108,7 @@ pub fn default_vm_name(root: &Path) -> String {
     format!("dirtbag-{base}-{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
-/// Keep `[A-Za-z0-9_-]`, collapse everything else to `-`.
+/// Keep `[A-Za-z0-9_-]`. Replace all other characters with `-`.
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })

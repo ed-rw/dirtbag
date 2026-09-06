@@ -19,7 +19,7 @@ pub fn run_copies(ssh: &Ssh, project: &Project) -> Result<()> {
     Ok(())
 }
 
-/// Run each `[[provision]]` step in order. Bails on the first non-zero exit.
+/// Run each `[[provision]]` step in order. Stop at the first non-zero exit.
 pub fn run_provisions(ssh: &Ssh, project: &Project) -> Result<()> {
     for (i, step) in project.config.provisions.iter().enumerate() {
         let n = i + 1;
@@ -30,7 +30,7 @@ pub fn run_provisions(ssh: &Ssh, project: &Project) -> Result<()> {
         } else {
             shell.to_string()
         };
-        // base64-pipe the script so its contents can't collide with shell syntax.
+        // Send the script as base64 to prevent shell syntax conflicts.
         let b64 = base64::engine::general_purpose::STANDARD.encode(script.as_bytes());
         let cmd = format!("echo '{b64}' | base64 -d | {runner}");
 

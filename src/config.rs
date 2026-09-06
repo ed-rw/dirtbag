@@ -19,7 +19,7 @@ pub struct Project {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Config {
-    /// Explicit VM name; when absent, derived from the project directory.
+    /// Explicit VM name. If absent, dirtbag derives it from the project directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
@@ -171,8 +171,8 @@ impl Project {
         Self::discover(&cwd)
     }
 
-    /// Discover the project by walking up from `start` looking for
-    /// `dirtbag.toml`.
+    /// Find the project. Search from `start` up through the parent directories
+    /// for `dirtbag.toml`.
     pub fn discover(start: &Path) -> Result<Self> {
         let path = find_config(start)
             .with_context(|| format!("no {CONFIG_FILE} found in {} or any parent", start.display()))?;
@@ -199,9 +199,8 @@ impl Project {
             .collect()
     }
 
-    /// Mount sources (name, resolved host path) that don't exist on the host.
-    /// Tart requires the host path to exist, so these are worth warning about
-    /// before boot.
+    /// Mount sources that do not exist on the host, as (name, resolved path).
+    /// Tart needs the host path to exist, so warn about these before boot.
     pub fn missing_mount_sources(&self) -> Vec<(String, String)> {
         self.config
             .mounts
@@ -223,7 +222,7 @@ impl Project {
     }
 }
 
-/// Walk up from `start` to find a `dirtbag.toml`.
+/// Search from `start` up through the parent directories for a `dirtbag.toml`.
 fn find_config(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
