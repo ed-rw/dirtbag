@@ -56,7 +56,7 @@ relative paths resolve against that file's directory.
 
 ```toml
 # VM name. Optional — defaults to `dirtbag-<dir>-<hash>`, derived from the
-# project directory and persisted in .dirtbag/state.toml on first run.
+# project path. Set it to pin the VM across directory moves.
 name  = "my-sandbox"
 
 # Base image to clone (OCI ref or a local VM name). Required.
@@ -125,15 +125,17 @@ Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
   so dirtbag spawns `tart run --no-graphics` in its own session (`setsid`), with
   output redirected to `.dirtbag/run.log`, and records the PID. The VM keeps
   running after `dirtbag on` returns.
-- **State** lives in a project-local `.dirtbag/` directory: the resolved VM
-  name, the run PID, the lifecycle phase, and a fingerprint of the mounts the VM
-  booted with.
+- **No host state file.** Tart is the source of truth for whether a VM exists
+  and is running; the VM name is derived from the project (`config.name`, or a
+  hash of the project path). The project-local `.dirtbag/` directory holds only
+  the run log.
 - **Access is over SSH** (libssh2). The same session handles the boot readiness
   probe, `ssh -- CMD`, the interactive PTY shell, SCP copy-in, and running
   provisioners.
 - **Provision once.** `on` runs the copies and provisioners only on a VM's first
-  boot; a flag in state records it. Later boots re-mount the shares but skip
-  provisioning. Use `dirtbag provision` to run the steps again.
+  boot, tracked by a marker *inside the guest* (`/var/lib/dirtbag/provisioned`),
+  so it belongs to the VM and cannot desync. Later boots re-mount the shares but
+  skip provisioning. Use `dirtbag provision` to run the steps again.
 - **Stop flushes the guest.** `tart stop` is a hard power-off, so `dirtbag stop`
   runs `sync` in the guest over SSH first. Without it, writes from the session
   are lost on the next boot.

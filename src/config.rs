@@ -1,5 +1,6 @@
 //! `dirtbag.toml` model, discovery, validation, and path resolution.
 
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -8,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::tart::{self, DirShare};
 
 pub const CONFIG_FILE: &str = "dirtbag.toml";
+pub const DIRTBAG_DIR: &str = ".dirtbag";
+pub const RUN_LOG: &str = "run.log";
 
 /// A parsed `dirtbag.toml` together with the project root it was found in.
 #[derive(Debug, Clone)]
@@ -220,6 +223,51 @@ impl Project {
             .to_string_lossy()
             .into_owned()
     }
+
+    /// The Tart VM name: the configured `name`, or one derived from the project
+    /// path. dirtbag stores no name — tart is the source of truth for the VM.
+    pub fn vm_name(&self) -> String {
+        self.config
+            .name
+            .clone()
+            .unwrap_or_else(|| derive_vm_name(&self.root))
+    }
+
+    /// The project-local `.dirtbag/` directory (holds the run log).
+    pub fn dirtbag_dir(&self) -> PathBuf {
+        self.root.join(DIRTBAG_DIR)
+    }
+
+    /// The detached `tart run` log file.
+    pub fn run_log(&self) -> PathBuf {
+        self.dirtbag_dir().join(RUN_LOG)
+    }
+}
+
+/// Derive a stable VM name from a project directory: `dirtbag-<dir>-<hash>`.
+///
+/// The hash is taken over the canonical path, so the name is unique per project
+/// directory and stable as long as the directory is not moved. Set `name` in
+/// the config to pin a VM across moves.
+fn derive_vm_name(root: &Path) -> String {
+    let base = root
+        .file_name()
+        .map(|s| sanitize(&s.to_string_lossy()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "vm".to_string());
+
+    let abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    abs.hash(&mut hasher);
+
+    format!("dirtbag-{base}-{:08x}", (hasher.finish() & 0xffff_ffff) as u32)
+}
+
+/// Keep `[A-Za-z0-9_-]`. Replace all other characters with `-`.
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .collect()
 }
 
 /// Search from `start` up through the parent directories for a `dirtbag.toml`.
@@ -353,5 +401,43 @@ password = "admin"
     #[test]
     fn rejects_empty_image() {
         assert!(Config::parse("image = \"\"").unwrap_err().to_string().contains("image"));
+    }
+
+    #[test]
+    fn vm_name_prefers_config_name() {
+        let project = Project {
+            root: PathBuf::from("/tmp/whatever"),
+            config: Config::parse("image = \"x\"\nname = \"pinned\"").unwrap(),
+        };
+        assert_eq!(project.vm_name(), "pinned");
+    }
+
+    #[test]
+    fn vm_name_derives_deterministically_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project {
+            root: dir.path().to_path_buf(),
+            config: Config::parse("image = \"x\"").unwrap(),
+        };
+        let name = project.vm_name();
+        assert_eq!(name, project.vm_name());
+        assert!(name.starts_with("dirtbag-"));
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn run_log_is_under_dirtbag_dir() {
+        let project = Project {
+            root: PathBuf::from("/tmp/proj"),
+            config: Config::parse("image = \"x\"").unwrap(),
+        };
+        assert_eq!(project.run_log(), PathBuf::from("/tmp/proj/.dirtbag/run.log"));
+    }
+
+    #[test]
+    fn sanitize_replaces_unsafe_chars() {
+        assert_eq!(sanitize("my project!@#"), "my-project---");
     }
 }

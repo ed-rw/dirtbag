@@ -6,7 +6,6 @@ mod guest;
 mod process;
 mod provision;
 mod ssh;
-mod state;
 mod tart;
 
 use std::process::ExitCode;

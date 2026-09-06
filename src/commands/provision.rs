@@ -2,17 +2,14 @@ use anyhow::{Context, Result};
 
 use crate::config::Project;
 use crate::ssh::{Ssh, SSH_PORT};
-use crate::state::State;
 use crate::tart::Tart;
 
 /// `dirtbag provision` — re-run provisioners against the running VM.
 pub fn run() -> Result<()> {
     let project = Project::discover_cwd()?;
-    let state = State::load(&project.root)?
-        .context("no dirtbag state; run `dirtbag on` first")?;
     let tart = Tart::locate()?;
     let ip = tart
-        .ip(&state.vm_name)?
+        .ip(&project.vm_name())?
         .context("VM has no IP — is it running? try `dirtbag on`")?;
 
     let ssh = Ssh::connect(
