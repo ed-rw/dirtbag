@@ -5,10 +5,11 @@
 //! because it needs an Apple-Silicon host with `tart`, network access, and
 //! macOS Local Network permission; run it with `cargo test -- --ignored`.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 fn dirtbag() -> Command {
     Command::new(env!("CARGO_BIN_EXE_dirtbag"))
@@ -18,6 +19,39 @@ fn run_in(dir: &Path, args: &[&str]) -> Output {
     dirtbag()
         .args(args)
         .current_dir(dir)
+        .output()
+        .expect("spawning dirtbag")
+}
+
+/// Write a stub `tart` that reports no VMs: `list` gives an empty set and every
+/// other subcommand fails, which is what a real `tart` does for a VM that was
+/// never created.
+fn stub_tart() -> TempDir {
+    let dir = tempdir().unwrap();
+    let bin = dir.path().join("tart");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\ncase \"$1\" in\nlist) echo '[]' ;;\n*) exit 1 ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+/// Run dirtbag against [`stub_tart`] instead of the host's `tart`. Tests of the
+/// "no VM yet" paths need a `tart` on PATH to reach the message they assert,
+/// but no real one: a CI runner has none, and a developer's own VMs must not
+/// change the result.
+fn run_with_stub_tart(dir: &Path, args: &[&str]) -> Output {
+    let stub = stub_tart();
+    let path = match std::env::var_os("PATH") {
+        Some(p) => format!("{}:{}", stub.path().display(), p.to_string_lossy()),
+        None => stub.path().display().to_string(),
+    };
+    dirtbag()
+        .args(args)
+        .current_dir(dir)
+        .env("PATH", path)
         .output()
         .expect("spawning dirtbag")
 }
@@ -82,7 +116,7 @@ fn up_without_config_reports_missing_toml() {
 fn status_in_fresh_project_reports_not_created() {
     let dir = tempdir().unwrap();
     run_in(dir.path(), &["init"]);
-    let out = run_in(dir.path(), &["status"]);
+    let out = run_with_stub_tart(dir.path(), &["status"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -95,7 +129,7 @@ fn status_in_fresh_project_reports_not_created() {
 fn ssh_without_state_reports_no_state() {
     let dir = tempdir().unwrap();
     run_in(dir.path(), &["init"]);
-    let out = run_in(dir.path(), &["ssh", "--", "true"]);
+    let out = run_with_stub_tart(dir.path(), &["ssh", "--", "true"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag up"));
 }
