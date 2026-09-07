@@ -12,11 +12,18 @@ pub const CONFIG_FILE: &str = "dirtbag.toml";
 pub const DIRTBAG_DIR: &str = ".dirtbag";
 pub const RUN_LOG: &str = "run.log";
 
-/// A parsed `dirtbag.toml` together with the project root it was found in.
+/// Stem of the default [`CONFIG_FILE`]. A config file with this stem keeps the
+/// original name and state paths, so it does not disturb existing sandboxes.
+const DEFAULT_STEM: &str = "dirtbag";
+
+/// A parsed config file with the project root that contains it.
 #[derive(Debug, Clone)]
 pub struct Project {
-    /// Directory containing `dirtbag.toml`; all relative paths resolve here.
+    /// Directory containing the config file; all relative paths resolve here.
     pub root: PathBuf,
+    /// The config file itself. Its stem disambiguates sibling sandboxes that
+    /// share a directory (see [`Project::vm_name`] and [`Project::run_log`]).
+    pub config_path: PathBuf,
     pub config: Config,
 }
 
@@ -233,7 +240,9 @@ fn validate_steps(steps: &[Step], label: &str) -> Result<()> {
         // later step asks about it.
         for dep in &s.needs {
             if !ids.contains(dep.as_str()) {
-                bail!("[[{label}]] #{n}: `needs` refers to `{dep}`, which is not an earlier step id");
+                bail!(
+                    "[[{label}]] #{n}: `needs` refers to `{dep}`, which is not an earlier step id"
+                );
             }
         }
         if let Some(id) = s.id.as_deref() {
@@ -249,6 +258,15 @@ fn validate_steps(steps: &[Step], label: &str) -> Result<()> {
 }
 
 impl Project {
+    /// Load an explicit config file when `file` is given, otherwise discover
+    /// `dirtbag.toml` from the current working directory.
+    pub fn find(file: Option<&Path>) -> Result<Self> {
+        match file {
+            Some(path) => Self::load(path),
+            None => Self::discover_cwd(),
+        }
+    }
+
     /// Discover the project from the current working directory.
     pub fn discover_cwd() -> Result<Self> {
         let cwd = std::env::current_dir().context("resolving current directory")?;
@@ -264,14 +282,32 @@ impl Project {
                 start.display()
             )
         })?;
-        let root = path
+        Self::load(&path)
+    }
+
+    /// Load the project from an explicit config file path. The file's parent
+    /// directory becomes the project root that relative paths resolve against.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        // Resolve to an absolute path so the root and the derived VM name do not
+        // depend on the current directory. The read above proves the file
+        // exists, so join the cwd only if `canonicalize` fails.
+        let config_path = std::fs::canonicalize(path).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        });
+        let root = config_path
             .parent()
-            .expect("config path has a parent")
+            .expect("an absolute config path has a parent")
             .to_path_buf();
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
         let config = Config::parse(&text)?;
-        Ok(Self { root, config })
+        Ok(Self {
+            root,
+            config_path,
+            config,
+        })
     }
 
     /// The mounts with defaults filled in and validated. `name` defaults to the
@@ -354,7 +390,7 @@ impl Project {
         self.config
             .name
             .clone()
-            .unwrap_or_else(|| derive_vm_name(&self.root))
+            .unwrap_or_else(|| derive_vm_name(&self.root, self.config_stem()))
     }
 
     /// The project-local `.dirtbag/` directory (holds the run log).
@@ -362,9 +398,24 @@ impl Project {
         self.root.join(DIRTBAG_DIR)
     }
 
-    /// The detached `tart run` log file.
+    /// The detached `tart run` log file. A non-default config file gets its own
+    /// log (`<stem>.run.log`) so sibling sandboxes do not clobber each other.
     pub fn run_log(&self) -> PathBuf {
-        self.dirtbag_dir().join(RUN_LOG)
+        let name = match self.config_stem() {
+            DEFAULT_STEM => RUN_LOG.to_string(),
+            stem => format!("{stem}.{RUN_LOG}"),
+        };
+        self.dirtbag_dir().join(name)
+    }
+
+    /// The config file's stem — `dirtbag` for the default `dirtbag.toml`,
+    /// otherwise the file name without its final extension. It keeps sibling
+    /// sandboxes in one directory distinct.
+    fn config_stem(&self) -> &str {
+        self.config_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(DEFAULT_STEM)
     }
 }
 
@@ -373,8 +424,13 @@ impl Project {
 /// The hash is taken over the canonical path, so the name is unique per project
 /// directory and stable as long as the directory is not moved. Set `name` in
 /// the config to pin a VM across moves.
-fn derive_vm_name(root: &Path) -> String {
-    let base = root
+///
+/// A non-default `stem` (any config file other than `dirtbag.toml`) folds into
+/// both the base and the hash, so two config files in one directory derive
+/// different names. The default stem changes nothing, so earlier VM names stay
+/// stable.
+fn derive_vm_name(root: &Path, stem: &str) -> String {
+    let mut base = root
         .file_name()
         .map(|s| sanitize(&s.to_string_lossy()))
         .filter(|s| !s.is_empty())
@@ -383,6 +439,11 @@ fn derive_vm_name(root: &Path) -> String {
     let abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut hasher);
+
+    if stem != DEFAULT_STEM {
+        base = format!("{base}-{}", sanitize(stem));
+        stem.hash(&mut hasher);
+    }
 
     format!(
         "dirtbag-{base}-{:08x}",
@@ -522,10 +583,7 @@ password = "admin"
 
     #[test]
     fn mount_name_and_target_default_to_dir_name() {
-        let project = Project {
-            root: PathBuf::from("/tmp/myproj"),
-            config: Config::parse("image = \"x\"\n[[mount]]\nsource = \".\"\n").unwrap(),
-        };
+        let project = project_at("/tmp/myproj", "image = \"x\"\n[[mount]]\nsource = \".\"\n");
         let mounts = project.mounts().unwrap();
         assert_eq!(mounts[0].name, "myproj");
         assert_eq!(mounts[0].target, "/opt/myproj");
@@ -539,11 +597,18 @@ password = "admin"
         assert_eq!(c, again);
     }
 
-    fn project_with(config: &str) -> Project {
+    /// A project rooted at `root` with the default `dirtbag.toml` config file.
+    fn project_at(root: &str, config: &str) -> Project {
+        let root = PathBuf::from(root);
         Project {
-            root: PathBuf::from("/tmp/proj"),
+            config_path: root.join(CONFIG_FILE),
+            root,
             config: Config::parse(config).unwrap(),
         }
+    }
+
+    fn project_with(config: &str) -> Project {
+        project_at("/tmp/proj", config)
     }
 
     #[test]
@@ -653,10 +718,9 @@ password = "admin"
 
     #[test]
     fn rejects_self_referential_needs() {
-        let err = Config::parse(
-            "image=\"x\"\n[[provision]]\nid=\"a\"\nneeds=[\"a\"]\ninline=\"echo\"\n",
-        )
-        .unwrap_err();
+        let err =
+            Config::parse("image=\"x\"\n[[provision]]\nid=\"a\"\nneeds=[\"a\"]\ninline=\"echo\"\n")
+                .unwrap_err();
         assert!(err.to_string().contains("not an earlier step id"));
     }
 
@@ -707,20 +771,14 @@ password = "admin"
 
     #[test]
     fn vm_name_prefers_config_name() {
-        let project = Project {
-            root: PathBuf::from("/tmp/whatever"),
-            config: Config::parse("image = \"x\"\nname = \"pinned\"").unwrap(),
-        };
+        let project = project_at("/tmp/whatever", "image = \"x\"\nname = \"pinned\"");
         assert_eq!(project.vm_name(), "pinned");
     }
 
     #[test]
     fn vm_name_derives_deterministically_when_unset() {
         let dir = tempfile::tempdir().unwrap();
-        let project = Project {
-            root: dir.path().to_path_buf(),
-            config: Config::parse("image = \"x\"").unwrap(),
-        };
+        let project = project_at(&dir.path().to_string_lossy(), "image = \"x\"");
         let name = project.vm_name();
         assert_eq!(name, project.vm_name());
         assert!(name.starts_with("dirtbag-"));
@@ -731,11 +789,23 @@ password = "admin"
     }
 
     #[test]
-    fn run_log_is_under_dirtbag_dir() {
-        let project = Project {
-            root: PathBuf::from("/tmp/proj"),
+    fn a_non_default_config_file_derives_a_distinct_vm_name_and_run_log() {
+        let root = PathBuf::from("/tmp/proj");
+        let default = project_at("/tmp/proj", "image = \"x\"");
+        let sibling = Project {
+            root: root.clone(),
+            config_path: root.join("dirtbag.dev.toml"),
             config: Config::parse("image = \"x\"").unwrap(),
         };
+        // Same directory, but the sibling file gets its own VM and its own log.
+        assert_ne!(default.vm_name(), sibling.vm_name());
+        assert_eq!(default.run_log(), root.join(".dirtbag/run.log"));
+        assert_eq!(sibling.run_log(), root.join(".dirtbag/dirtbag.dev.run.log"));
+    }
+
+    #[test]
+    fn run_log_is_under_dirtbag_dir() {
+        let project = project_at("/tmp/proj", "image = \"x\"");
         assert_eq!(
             project.run_log(),
             PathBuf::from("/tmp/proj/.dirtbag/run.log")

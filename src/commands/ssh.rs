@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -9,8 +10,8 @@ use crate::tart::Tart;
 /// `dirtbag ssh [-- CMD...]` — interactive shell, or run a command.
 ///
 /// Returns the remote exit status as the process exit code.
-pub fn run(cmd: Vec<String>) -> Result<ExitCode> {
-    let project = Project::discover_cwd()?;
+pub fn run(file: Option<&Path>, cmd: Vec<String>) -> Result<ExitCode> {
+    let project = Project::find(file)?;
     let tart = Tart::locate()?;
     let ip = tart
         .ip(&project.vm_name())?

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// A CLI for managing Tart VMs as disposable dev sandboxes.
@@ -7,6 +9,11 @@ pub struct Cli {
     /// Increase logging verbosity (-v debug, -vv trace).
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Use this config file instead of discovering `dirtbag.toml`. Lets a
+    /// directory hold several sandboxes side by side.
+    #[arg(short, long, global = true, value_name = "PATH")]
+    pub file: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Command,

@@ -17,7 +17,7 @@ fn main() -> ExitCode {
     let cli = cli::Cli::parse();
     init_tracing(cli.verbose);
 
-    match commands::dispatch(cli.command) {
+    match commands::dispatch(cli.command, cli.file.as_deref()) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err:#}");
