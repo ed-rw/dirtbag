@@ -4,6 +4,7 @@ mod init;
 mod lifecycle;
 mod provision;
 mod ssh;
+mod version;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -24,6 +25,7 @@ pub fn dispatch(command: Command, file: Option<&Path>) -> Result<ExitCode> {
         Command::Reload => lifecycle::reload(file).map(ok),
         Command::Destroy => lifecycle::destroy(file).map(ok),
         Command::Provision => provision::run(file).map(ok),
+        Command::Version => version::run().map(ok),
     }
 }
 

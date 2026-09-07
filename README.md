@@ -31,6 +31,17 @@ other guests can be added later.
 
 ## Install
 
+Download the latest build from
+[Releases](https://github.com/ed-rw/dirtbag/releases):
+
+```console
+$ tar -xzf dirtbag-<version>-aarch64-apple-darwin.tar.gz
+$ sudo mv dirtbag-<version>-aarch64-apple-darwin/dirtbag /usr/local/bin/
+$ xattr -d com.apple.quarantine /usr/local/bin/dirtbag   # the binary is unsigned
+```
+
+Or build it:
+
 ```console
 $ cargo build --release
 $ cp target/release/dirtbag /usr/local/bin/   # or anywhere on PATH
@@ -155,6 +166,7 @@ Notes:
 | `dirtbag down` | Run on-shutdown steps → `sync` the guest → stop the VM. |
 | `dirtbag reload` | Bring the VM down and back up to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |
+| `dirtbag version` | Show the dirtbag version, and the version and path of the `tart` it uses. |
 | `dirtbag destroy` | Stop and delete the VM, and remove its `.dirtbag/` state (a sibling `-f` sandbox keeps its own). |
 
 Global flags:

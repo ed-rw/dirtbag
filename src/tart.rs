@@ -52,6 +52,10 @@ pub fn list_args() -> Vec<String> {
     vec!["list".into(), "--format".into(), "json".into()]
 }
 
+pub fn version_args() -> Vec<String> {
+    vec!["--version".into()]
+}
+
 pub fn ip_args(name: &str) -> Vec<String> {
     vec!["ip".into(), name.into()]
 }
@@ -156,6 +160,11 @@ impl Tart {
             });
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Get the version of the located `tart`.
+    pub fn version(&self) -> Result<String, TartError> {
+        Ok(self.checked(&version_args())?.trim().to_string())
     }
 
     pub fn list(&self) -> Result<Vec<Vm>, TartError> {

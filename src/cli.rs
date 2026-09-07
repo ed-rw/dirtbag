@@ -48,4 +48,7 @@ pub enum Command {
 
     /// Re-run provisioners against the running VM.
     Provision,
+
+    /// Show the dirtbag and tart versions.
+    Version,
 }

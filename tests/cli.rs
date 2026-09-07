@@ -36,9 +36,24 @@ fn help_lists_all_commands() {
         "reload",
         "destroy",
         "provision",
+        "version",
     ] {
         assert!(text.contains(cmd), "help missing `{cmd}`:\n{text}");
     }
+}
+
+/// `version` prints the crate version and works outside a project.
+#[test]
+fn version_reports_dirtbag_and_tart() {
+    let dir = tempdir().unwrap();
+    let out = run_in(dir.path(), &["version"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!("dirtbag {}", env!("CARGO_PKG_VERSION"))),
+        "unexpected version output:\n{text}"
+    );
+    assert!(text.contains("tart"), "no tart line:\n{text}");
 }
 
 #[test]
