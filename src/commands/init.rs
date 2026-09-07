@@ -66,23 +66,33 @@ apt-get install -y build-essential git
 echo "dirtbag: provisioning complete"
 "#;
 
-pub fn run() -> Result<()> {
+pub fn run(file: Option<&Path>) -> Result<()> {
     let cwd = std::env::current_dir().context("resolving current directory")?;
-    let config_path = cwd.join(CONFIG_FILE);
+    // `--file` scaffolds a differently-named config. `join` absorbs an absolute
+    // path and resolves a relative one against the cwd.
+    let config_path = match file {
+        Some(path) => cwd.join(path),
+        None => cwd.join(CONFIG_FILE),
+    };
     if config_path.exists() {
-        bail!("{CONFIG_FILE} already exists in {}", cwd.display());
+        bail!("{} already exists", config_path.display());
     }
+    let root = config_path.parent().unwrap_or(&cwd);
+    let file_name = config_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| CONFIG_FILE.to_string());
 
-    let contents = template(&share_name_for(&cwd));
+    let contents = template(&share_name_for(root));
     // Make sure the template is valid before you write it.
     Config::parse(&contents).context("internal: init template failed to validate")?;
 
     std::fs::write(&config_path, &contents)
         .with_context(|| format!("writing {}", config_path.display()))?;
-    write_if_absent(&cwd.join("scripts").join("setup.sh"), SETUP_SH)?;
+    write_if_absent(&root.join("scripts").join("setup.sh"), SETUP_SH)?;
 
-    println!("Created {CONFIG_FILE} and scripts/setup.sh");
-    println!("Next: edit dirtbag.toml, then run `dirtbag up`.");
+    println!("Created {file_name} and scripts/setup.sh");
+    println!("Next: edit {file_name}, then run `dirtbag up`.");
     Ok(())
 }
 

@@ -5,6 +5,7 @@
 //! provisioned; and the VM name is derived from the project (see
 //! [`Project::vm_name`]).
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -19,16 +20,12 @@ const IP_TIMEOUT: Duration = Duration::from_secs(180);
 const SSH_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-fn discover() -> Result<Project> {
-    Project::discover_cwd()
-}
-
 fn is_running(tart: &Tart, name: &str) -> Result<bool> {
     Ok(tart.get(name)?.map(|v| v.running).unwrap_or(false))
 }
 
-pub fn up() -> Result<()> {
-    let project = discover()?;
+pub fn up(file: Option<&Path>) -> Result<()> {
+    let project = Project::find(file)?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
@@ -111,9 +108,9 @@ fn configure_boot(project: &Project, ip: &str) -> Result<()> {
 
 /// `dirtbag reload` — bring the VM down (if running) and back up so mount and
 /// resource changes take effect.
-pub fn reload() -> Result<()> {
-    down()?;
-    up()
+pub fn reload(file: Option<&Path>) -> Result<()> {
+    down(file)?;
+    up(file)
 }
 
 fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
@@ -138,8 +135,8 @@ fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
     }
 }
 
-pub fn down() -> Result<()> {
-    let project = discover()?;
+pub fn down(file: Option<&Path>) -> Result<()> {
+    let project = Project::find(file)?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
@@ -171,8 +168,8 @@ fn shutdown_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
     crate::provision::run_on_shutdown(&ssh, project)
 }
 
-pub fn destroy() -> Result<()> {
-    let project = discover()?;
+pub fn destroy(file: Option<&Path>) -> Result<()> {
+    let project = Project::find(file)?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
@@ -187,14 +184,23 @@ pub fn destroy() -> Result<()> {
         println!("VM `{name}` does not exist");
     }
 
-    let dir = project.dirtbag_dir();
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    // Remove only this sandbox's own run log, so a sibling that shares the
+    // directory keeps its state. Tidy the shared `.dirtbag/` away once it holds
+    // nothing more (`remove_dir` succeeds only on an empty directory).
+    let log = project.run_log();
+    if log.exists() {
+        std::fs::remove_file(&log).with_context(|| format!("removing {}", log.display()))?;
     }
+    let _ = std::fs::remove_dir(project.dirtbag_dir());
     Ok(())
 }
 
-pub fn status() -> Result<()> {
+pub fn status(file: Option<&Path>) -> Result<()> {
+    // With an explicit `--file`, report that project and surface any load error.
+    // Without one, discover from the cwd and fall back to a global VM listing.
+    if file.is_some() {
+        return project_status(&Project::find(file)?);
+    }
     let cwd = std::env::current_dir().context("resolving current directory")?;
     match Project::discover(&cwd) {
         Ok(project) => project_status(&project),

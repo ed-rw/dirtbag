@@ -85,6 +85,43 @@ fn ssh_without_state_reports_no_state() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("dirtbag up"));
 }
 
+#[test]
+fn init_with_file_scaffolds_named_config() {
+    let dir = tempdir().unwrap();
+    let out = run_in(dir.path(), &["--file", "dirtbag.dev.toml", "init"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join("dirtbag.dev.toml").is_file());
+    // init leaves the default file untouched, so both live side by side.
+    assert!(!dir.path().join("dirtbag.toml").exists());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("dirtbag.dev.toml"));
+}
+
+#[test]
+fn file_option_selects_a_sibling_config() {
+    let dir = tempdir().unwrap();
+    // Two sandboxes in one directory. `up` on the named one must read it, not
+    // the default, so a bad image in the sibling is what fails.
+    run_in(dir.path(), &["init"]);
+    std::fs::write(dir.path().join("dirtbag.dev.toml"), "image = \"\"\n").unwrap();
+
+    let out = run_in(dir.path(), &["--file", "dirtbag.dev.toml", "up"]);
+    assert!(!out.status.success());
+    // Validation rejects the empty image. This proves dirtbag read the sibling.
+    assert!(String::from_utf8_lossy(&out.stderr).contains("image"));
+}
+
+#[test]
+fn file_option_reports_a_missing_file() {
+    let dir = tempdir().unwrap();
+    let out = run_in(dir.path(), &["--file", "nope.toml", "status"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nope.toml"));
+}
+
 /// Full lifecycle against a real VM. Ignored by default; needs tart + a Linux
 /// image pull + Local Network permission.
 #[test]
@@ -121,6 +158,108 @@ fn e2e_up_ssh_destroy() {
     let destroy = run_in(dir.path(), &["destroy"]);
     assert!(destroy.status.success());
     assert!(!dir.path().join(".dirtbag").exists());
+}
+
+/// Two sandboxes in one directory (`dirtbag.toml` + a `-f` sibling) are fully
+/// independent VMs. Destroy one; the other keeps running with its state intact.
+/// Ignored by default; needs tart + a Linux image pull.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_sibling_sandboxes_are_independent() {
+    let dir = tempdir().unwrap();
+    // Same image (pulled once), but a distinct mount tag per sandbox so an `ls`
+    // inside each VM proves it booted from its own config.
+    let config = |tag: &str| {
+        format!(
+            "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
+             [resources]\ncpu = 2\nmemory = 2048\n\
+             [[mount]]\nname = \"{tag}\"\nsource = \".\"\ntarget = \"/opt/{tag}\"\n",
+        )
+    };
+    std::fs::write(dir.path().join("dirtbag.toml"), config("main")).unwrap();
+    std::fs::write(dir.path().join("dirtbag.gpu.toml"), config("gpu")).unwrap();
+
+    let gpu = ["--file", "dirtbag.gpu.toml"];
+    let with = |args: &[&str], extra: &[&str]| -> Vec<String> {
+        args.iter().chain(extra).map(|s| s.to_string()).collect()
+    };
+    let run_gpu = |args: &[&str]| {
+        let a = with(&gpu, args);
+        let a: Vec<&str> = a.iter().map(String::as_str).collect();
+        run_in(dir.path(), &a)
+    };
+
+    // Boot both sandboxes from the one directory.
+    let up_main = run_in(dir.path(), &["up"]);
+    assert!(
+        up_main.status.success(),
+        "main up failed: {}",
+        String::from_utf8_lossy(&up_main.stderr)
+    );
+    let up_gpu = run_gpu(&["up"]);
+    assert!(
+        up_gpu.status.success(),
+        "gpu up failed: {}",
+        String::from_utf8_lossy(&up_gpu.stderr)
+    );
+
+    // They are two different VMs, each with its own detached run log.
+    let name_main = vm_name_from_up(&up_main);
+    let name_gpu = vm_name_from_up(&up_gpu);
+    assert_ne!(
+        name_main, name_gpu,
+        "siblings must derive distinct VM names"
+    );
+    assert!(dir.path().join(".dirtbag/run.log").is_file());
+    assert!(dir.path().join(".dirtbag/dirtbag.gpu.run.log").is_file());
+
+    // Each VM mounted the tag from its own config, not the sibling's.
+    assert!(
+        run_gpu(&["ssh", "--", "ls", "/opt/gpu/dirtbag.gpu.toml"])
+            .status
+            .success(),
+        "gpu VM missing its own mount"
+    );
+    assert!(
+        !run_gpu(&["ssh", "--", "ls", "/opt/main"]).status.success(),
+        "gpu VM should not have the main sandbox's mount"
+    );
+
+    // Destroy the default; the sibling keeps running with its log intact.
+    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert!(
+        String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout).contains("not created"),
+        "main VM should be gone after destroy"
+    );
+    assert!(
+        dir.path().join(".dirtbag/dirtbag.gpu.run.log").is_file(),
+        "destroying the default must not remove the sibling's run log"
+    );
+    let status_gpu = run_gpu(&["status"]);
+    let gpu_out = String::from_utf8_lossy(&status_gpu.stdout);
+    assert!(gpu_out.contains(&name_gpu), "sibling VM should still exist");
+    assert!(
+        !gpu_out.contains("not created"),
+        "sibling VM should still be up:\n{gpu_out}"
+    );
+
+    // The sibling still works end to end, then destroys cleanly.
+    assert!(run_gpu(&["ssh", "--", "true"]).status.success());
+    assert!(run_gpu(&["destroy"]).status.success());
+    assert!(
+        !dir.path().join(".dirtbag").exists(),
+        "the shared state dir should be gone once both sandboxes are destroyed"
+    );
+}
+
+/// Extract the VM name from an `up` success line: ``VM `name` is up at IP``.
+fn vm_name_from_up(out: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .split('`')
+        .nth(1)
+        .unwrap_or_else(|| panic!("no VM name in up output:\n{stdout}"))
+        .to_string()
 }
 
 /// A VM provisions one time. A down then a restart re-mounts the shares but

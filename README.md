@@ -52,7 +52,8 @@ $ dirtbag destroy
 ## Configuration — `dirtbag.toml`
 
 `dirtbag` walks up from the current directory to find `dirtbag.toml`; all
-relative paths resolve against that file's directory.
+relative paths resolve against that file's directory. Pass `-f <PATH>` to use a
+different config file (see [Commands](#commands)).
 
 ```toml
 # VM name. Optional — defaults to `dirtbag-<dir>-<hash>`, derived from the
@@ -154,9 +155,17 @@ Notes:
 | `dirtbag down` | Run on-shutdown steps → `sync` the guest → stop the VM. |
 | `dirtbag reload` | Bring the VM down and back up to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |
-| `dirtbag destroy` | Stop and delete the VM, and remove `.dirtbag/`. |
+| `dirtbag destroy` | Stop and delete the VM, and remove its `.dirtbag/` state (a sibling `-f` sandbox keeps its own). |
 
-Global flags: `-v` / `-vv` increase logging (or set `RUST_LOG`).
+Global flags:
+
+- `-v` / `-vv` increase logging (or set `RUST_LOG`).
+- `-f` / `--file <PATH>` selects a config file instead of discovering
+  `dirtbag.toml`. This lets one directory hold several sandboxes side by side —
+  e.g. `dirtbag -f dirtbag.gpu.toml up`. A non-default file gets its own VM
+  (its name folds in the file stem) and its own `.dirtbag/<stem>.run.log`, so
+  siblings never collide. `dirtbag -f dirtbag.gpu.toml init` scaffolds a new
+  file under that name.
 
 ## How it works
 
