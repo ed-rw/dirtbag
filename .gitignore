@@ -1,3 +1,5 @@
 /target
 # Project-local VM state written by dirtbag
 /.dirtbag/
+# Release archives built by .github/workflows/release.yml
+/dist/
