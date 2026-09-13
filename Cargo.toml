@@ -1,6 +1,6 @@
 [package]
 name = "dirtbag"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A CLI for managing Tart VMs as disposable dev sandboxes"
 license = "MIT"
@@ -21,7 +21,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 which = "8"
 nix = { version = "0.31", features = ["process", "signal", "fs", "term"] }
 ssh2 = "0.9"
-crossterm = "0.29"
 base64 = "0.23"
 
 [dev-dependencies]

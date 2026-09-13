@@ -2,7 +2,9 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -28,6 +30,9 @@ impl Ssh {
         let mut session = Session::new().context("creating ssh session")?;
         session.set_tcp_stream(tcp);
         session.handshake().context("ssh handshake")?;
+        // Ask libssh2 for keepalives so a quiet channel does not stall behind a
+        // NAT idle timeout during a long `exec` step.
+        session.set_keepalive(true, 15);
         session
             .userauth_password(user, password)
             .context("ssh password authentication")?;
@@ -126,124 +131,66 @@ impl Ssh {
         Ok(())
     }
 
-    /// Open an interactive PTY shell connected to the local terminal. Return the
-    /// shell's exit status.
-    pub fn shell(&self) -> Result<i32> {
-        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let mut channel = self.session.channel_session().context("opening channel")?;
-        channel
-            .request_pty(
-                "xterm-256color",
-                None,
-                Some((cols as u32, rows as u32, 0, 0)),
-            )
-            .context("requesting pty")?;
-        channel.shell().context("starting shell")?;
+}
 
-        let _raw = RawMode::enable()?;
-        let _nb = NonBlockingStdin::enable();
-        self.session.set_blocking(false);
+/// Open an interactive shell on the guest through the system `ssh` client.
+///
+/// The client owns the terminal, so the session gets a real PTY with correct
+/// window resize and flow control. Return the remote exit status.
+pub fn interactive_shell(host: &str, port: u16, user: &str, password: &str) -> Result<i32> {
+    let askpass = AskpassScript::create()?;
+    let target = format!("{user}@{host}");
 
-        let mut chan_buf = [0u8; 8192];
-        let mut in_buf = [0u8; 8192];
-        let mut stdout = std::io::stdout();
-        let mut stdin = std::io::stdin();
-        let (mut last_cols, mut last_rows) = (cols, rows);
+    // The VMs are disposable and reuse IP addresses, so their host keys churn.
+    // Skip the host-key check and keep the churn out of the user's known_hosts.
+    // `ServerAliveInterval` holds the link open through a quiet stretch, such as
+    // a long build or an idle editor.
+    let status = Command::new("ssh")
+        .arg("-t")
+        .args(["-p", &port.to_string()])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "GlobalKnownHostsFile=/dev/null"])
+        .args(["-o", "LogLevel=ERROR"])
+        .args(["-o", "ServerAliveInterval=15"])
+        .args(["-o", "ServerAliveCountMax=3"])
+        .args(["-o", "NumberOfPasswordPrompts=1"])
+        .arg(&target)
+        // `SSH_ASKPASS_REQUIRE=force` makes ssh read the password from the helper
+        // even with a terminal attached. The helper reads it from the
+        // environment, so the password never lands in a file or the argument
+        // list. Needs OpenSSH 8.4 or later.
+        .env("SSH_ASKPASS", askpass.path())
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DIRTBAG_SSH_PASSWORD", password)
+        .status()
+        .context("running ssh")?;
 
-        let status = loop {
-            // Copy guest output to the terminal.
-            match channel.read(&mut chan_buf) {
-                Ok(0) => {
-                    if channel.eof() {
-                        break channel.exit_status().unwrap_or(0);
-                    }
-                }
-                Ok(n) => {
-                    stdout.write_all(&chan_buf[..n])?;
-                    stdout.flush()?;
-                    continue; // Read all guest output before you sleep.
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e).context("reading from guest"),
-            }
+    Ok(status.code().unwrap_or(1))
+}
 
-            // Send keyboard input to the guest.
-            match stdin.read(&mut in_buf) {
-                Ok(0) => {}
-                Ok(n) => {
-                    self.session.set_blocking(true);
-                    channel.write_all(&in_buf[..n])?;
-                    channel.flush()?;
-                    self.session.set_blocking(false);
-                    continue;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e).context("reading stdin"),
-            }
+/// A temporary askpass helper script. The [`Drop`] removes it.
+struct AskpassScript {
+    path: PathBuf,
+}
 
-            // Apply terminal size changes.
-            if let Ok((c, r)) = crossterm::terminal::size()
-                && (c, r) != (last_cols, last_rows)
-            {
-                self.session.set_blocking(true);
-                let _ = channel.request_pty_size(c as u32, r as u32, None, None);
-                self.session.set_blocking(false);
-                last_cols = c;
-                last_rows = r;
-            }
+impl AskpassScript {
+    fn create() -> Result<Self> {
+        let path = std::env::temp_dir().join(format!("dirtbag-askpass-{}.sh", std::process::id()));
+        std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$DIRTBAG_SSH_PASSWORD\"\n")
+            .with_context(|| format!("writing askpass helper to {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .context("setting askpass helper mode")?;
+        Ok(Self { path })
+    }
 
-            std::thread::sleep(Duration::from_millis(10));
-        };
-
-        self.session.set_blocking(true);
-        Ok(status)
+    fn path(&self) -> &Path {
+        &self.path
     }
 }
 
-/// RAII guard that puts the terminal in raw mode and restores it on drop.
-struct RawMode;
-
-impl RawMode {
-    fn enable() -> Result<Self> {
-        crossterm::terminal::enable_raw_mode().context("enabling raw terminal mode")?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawMode {
+impl Drop for AskpassScript {
     fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
-}
-
-/// RAII guard that makes stdin non-blocking and restores its flags on drop.
-struct NonBlockingStdin {
-    fd: i32,
-    prev: Option<nix::fcntl::OFlag>,
-}
-
-impl NonBlockingStdin {
-    fn enable() -> Self {
-        use nix::fcntl::{FcntlArg, OFlag, fcntl};
-        let fd = std::io::stdin().as_raw_fd();
-        // SAFETY: fd 0 (stdin) is valid for the life of the process.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        let prev = fcntl(borrowed, FcntlArg::F_GETFL)
-            .ok()
-            .map(OFlag::from_bits_truncate);
-        if let Some(flags) = prev {
-            let _ = fcntl(borrowed, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
-        }
-        Self { fd, prev }
-    }
-}
-
-impl Drop for NonBlockingStdin {
-    fn drop(&mut self) {
-        if let Some(flags) = self.prev {
-            // SAFETY: fd 0 (stdin) is valid for the life of the process.
-            let borrowed = unsafe { BorrowedFd::borrow_raw(self.fd) };
-            let _ = nix::fcntl::fcntl(borrowed, nix::fcntl::FcntlArg::F_SETFL(flags));
-        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 
 use crate::config::Project;
-use crate::ssh::{SSH_PORT, Ssh};
+use crate::ssh::{self, SSH_PORT, Ssh};
 use crate::tart::Tart;
 
 /// `dirtbag ssh [-- CMD...]` — interactive shell, or run a command.
@@ -17,16 +17,20 @@ pub fn run(file: Option<&Path>, cmd: Vec<String>) -> Result<ExitCode> {
         .ip(&project.vm_name())?
         .context("VM has no IP — is it running? try `dirtbag up`")?;
 
-    let ssh = Ssh::connect(
-        &ip,
-        SSH_PORT,
-        &project.config.ssh.user,
-        &project.config.ssh.password,
-    )?;
-
     let code = if cmd.is_empty() {
-        ssh.shell()?
+        ssh::interactive_shell(
+            &ip,
+            SSH_PORT,
+            &project.config.ssh.user,
+            &project.config.ssh.password,
+        )?
     } else {
+        let ssh = Ssh::connect(
+            &ip,
+            SSH_PORT,
+            &project.config.ssh.user,
+            &project.config.ssh.password,
+        )?;
         ssh.exec_streaming(&cmd.join(" "))?
     };
 
