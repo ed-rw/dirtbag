@@ -25,6 +25,9 @@ pub struct Project {
     /// share a directory (see [`Project::vm_name`] and [`Project::run_log`]).
     pub config_path: PathBuf,
     pub config: Config,
+    /// Optional instance label from `--instance`. It lets one config file run
+    /// several VMs side by side (see [`Project::vm_name`]).
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -260,11 +263,25 @@ fn validate_steps(steps: &[Step], label: &str) -> Result<()> {
 impl Project {
     /// Load an explicit config file when `file` is given, otherwise discover
     /// `dirtbag.toml` from the current working directory.
-    pub fn find(file: Option<&Path>) -> Result<Self> {
-        match file {
-            Some(path) => Self::load(path),
-            None => Self::discover_cwd(),
+    /// `instance` selects one VM of several from the same config file.
+    pub fn find(file: Option<&Path>, instance: Option<&str>) -> Result<Self> {
+        let project = match file {
+            Some(path) => Self::load(path)?,
+            None => Self::discover_cwd()?,
+        };
+        project.with_instance(instance)
+    }
+
+    /// Set the instance label. Tart VM names and run log names include it, so
+    /// it must be a non-empty run of `[A-Za-z0-9_-]`.
+    pub fn with_instance(mut self, instance: Option<&str>) -> Result<Self> {
+        if let Some(i) = instance
+            && (i.is_empty() || sanitize(i) != i)
+        {
+            bail!("instance `{i}` must be non-empty and use only letters, digits, `_` and `-`");
         }
+        self.instance = instance.map(str::to_string);
+        Ok(self)
     }
 
     /// Discover the project from the current working directory.
@@ -307,6 +324,7 @@ impl Project {
             root,
             config_path,
             config,
+            instance: None,
         })
     }
 
@@ -384,13 +402,31 @@ impl Project {
             .into_owned()
     }
 
-    /// The Tart VM name: the configured `name`, or one derived from the project
-    /// path. dirtbag stores no name — tart is the source of truth for the VM.
+    /// The Tart VM name: the [`base_vm_name`](Self::base_vm_name), with
+    /// `-<instance>` added when an instance is set. dirtbag stores no name —
+    /// tart is the source of truth for the VM.
     pub fn vm_name(&self) -> String {
+        let base = self.base_vm_name();
+        match &self.instance {
+            Some(instance) => format!("{base}-{instance}"),
+            None => base,
+        }
+    }
+
+    /// The VM name without an instance: the configured `name`, or one derived
+    /// from the project path. All instances of this config start with it.
+    pub fn base_vm_name(&self) -> String {
         self.config
             .name
             .clone()
             .unwrap_or_else(|| derive_vm_name(&self.root, self.config_stem()))
+    }
+
+    /// True if `vm` is the base VM of this config or one of its instances.
+    pub fn owns_vm(&self, vm: &str) -> bool {
+        let base = self.base_vm_name();
+        vm.strip_prefix(&base)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
     }
 
     /// The project-local `.dirtbag/` directory (holds the run log).
@@ -398,13 +434,17 @@ impl Project {
         self.root.join(DIRTBAG_DIR)
     }
 
-    /// The detached `tart run` log file. A non-default config file gets its own
-    /// log (`<stem>.run.log`) so sibling sandboxes do not clobber each other.
+    /// The detached `tart run` log file. A non-default config file and an
+    /// instance each add a part (`[<stem>.][<instance>.]run.log`), so sibling
+    /// sandboxes do not overwrite each other's logs.
     pub fn run_log(&self) -> PathBuf {
-        let name = match self.config_stem() {
-            DEFAULT_STEM => RUN_LOG.to_string(),
-            stem => format!("{stem}.{RUN_LOG}"),
-        };
+        let stem = Some(self.config_stem()).filter(|s| *s != DEFAULT_STEM);
+        let name = stem
+            .into_iter()
+            .chain(self.instance.as_deref())
+            .chain([RUN_LOG])
+            .collect::<Vec<_>>()
+            .join(".");
         self.dirtbag_dir().join(name)
     }
 
@@ -604,6 +644,7 @@ password = "admin"
             config_path: root.join(CONFIG_FILE),
             root,
             config: Config::parse(config).unwrap(),
+            instance: None,
         }
     }
 
@@ -796,6 +837,7 @@ password = "admin"
             root: root.clone(),
             config_path: root.join("dirtbag.dev.toml"),
             config: Config::parse("image = \"x\"").unwrap(),
+            instance: None,
         };
         // Same directory, but the sibling file gets its own VM and its own log.
         assert_ne!(default.vm_name(), sibling.vm_name());
@@ -810,6 +852,58 @@ password = "admin"
             project.run_log(),
             PathBuf::from("/tmp/proj/.dirtbag/run.log")
         );
+    }
+
+    #[test]
+    fn an_instance_suffixes_the_vm_name_and_run_log() {
+        let root = PathBuf::from("/tmp/proj");
+        let default = project_at("/tmp/proj", "image = \"x\"");
+        let base = default.vm_name();
+        let a = default.clone().with_instance(Some("a")).unwrap();
+        assert_eq!(a.vm_name(), format!("{base}-a"));
+        assert_eq!(a.base_vm_name(), base);
+        assert_eq!(a.run_log(), root.join(".dirtbag/a.run.log"));
+
+        let pinned = project_at("/tmp/proj", "image = \"x\"\nname = \"foo\"")
+            .with_instance(Some("bar"))
+            .unwrap();
+        assert_eq!(pinned.vm_name(), "foo-bar");
+    }
+
+    #[test]
+    fn an_instance_of_a_non_default_config_combines_both_in_the_run_log() {
+        let root = PathBuf::from("/tmp/proj");
+        let sibling = Project {
+            root: root.clone(),
+            config_path: root.join("dirtbag.dev.toml"),
+            config: Config::parse("image = \"x\"").unwrap(),
+            instance: None,
+        }
+        .with_instance(Some("b"))
+        .unwrap();
+        assert_eq!(
+            sibling.run_log(),
+            root.join(".dirtbag/dirtbag.dev.b.run.log")
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_instance_names() {
+        for bad in ["", "a b", "a/b", "a.b"] {
+            let err = project_with("image = \"x\"")
+                .with_instance(Some(bad))
+                .unwrap_err();
+            assert!(err.to_string().contains("instance"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn owns_vm_matches_the_base_and_its_instances_only() {
+        let project = project_at("/tmp/proj", "image = \"x\"\nname = \"foo\"");
+        assert!(project.owns_vm("foo"));
+        assert!(project.owns_vm("foo-bar"));
+        assert!(!project.owns_vm("foobar"));
+        assert!(!project.owns_vm("other"));
     }
 
     #[test]

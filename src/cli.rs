@@ -15,6 +15,11 @@ pub struct Cli {
     #[arg(short, long, global = true, value_name = "PATH")]
     pub file: Option<PathBuf>,
 
+    /// Select a named instance of the config. One config file can run several
+    /// VMs side by side. Each VM is named `<vm-name>-<INSTANCE>`.
+    #[arg(short, long, global = true, value_name = "INSTANCE")]
+    pub instance: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -34,7 +39,8 @@ pub enum Command {
         cmd: Vec<String>,
     },
 
-    /// Show the VM's status (name, state, IP).
+    /// Show the VM's status (name, state, IP). Without `--instance`, list every
+    /// instance of the config.
     Status,
 
     /// Gracefully stop the VM.
@@ -51,4 +57,7 @@ pub enum Command {
 
     /// Show the dirtbag and tart versions.
     Version,
+
+    /// Download the latest release from GitHub and install it over this binary.
+    Update,
 }
