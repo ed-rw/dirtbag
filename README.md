@@ -162,11 +162,12 @@ Notes:
 | `dirtbag init` | Scaffold a starter `dirtbag.toml` and `scripts/setup.sh`. |
 | `dirtbag up` | Clone (if needed) → apply resources → boot headless & detached → wait for SSH → mount shares → copy files → provision (first boot only) → run on-boot steps. Re-running on a running VM is a no-op. |
 | `dirtbag ssh [-- CMD…]` | Interactive shell, or run `CMD` in the VM (its exit status is propagated). |
-| `dirtbag status` | Show the VM's name, state, and IP. Outside a project, lists all Tart VMs. |
+| `dirtbag status` | Show the VM's name, state, and IP. Without `-i`, lists the config's VM and all its instances. Outside a project, lists all Tart VMs. |
 | `dirtbag down` | Run on-shutdown steps → `sync` the guest → stop the VM. |
 | `dirtbag reload` | Bring the VM down and back up to apply mount/resource changes. |
 | `dirtbag provision` | Re-run the provisioners against the running VM. |
 | `dirtbag version` | Show the dirtbag version, and the version and path of the `tart` it uses. |
+| `dirtbag update` | Download the latest GitHub release, verify its checksum, and install it over the running binary (use `sudo` if it lives in a root-owned directory). |
 | `dirtbag destroy` | Stop and delete the VM, and remove its `.dirtbag/` state (a sibling `-f` sandbox keeps its own). |
 
 Global flags:
@@ -178,6 +179,12 @@ Global flags:
   (its name folds in the file stem) and its own `.dirtbag/<stem>.run.log`, so
   siblings never collide. `dirtbag -f dirtbag.gpu.toml init` scaffolds a new
   file under that name.
+- `-i` / `--instance <INSTANCE>` runs another VM from the same config file —
+  e.g. `dirtbag -i agent2 up`, then `dirtbag -i agent2 ssh`. The instance VM is
+  named `<vm-name>-<INSTANCE>` and logs to `.dirtbag/[<stem>.]<INSTANCE>.run.log`.
+  Instance names use only letters, digits, `_` and `-`. Every instance mounts
+  the same host directories, so they see each other's writes there. Combine with
+  `-f` to run instances of a non-default config.
 
 ## How it works
 

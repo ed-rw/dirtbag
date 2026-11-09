@@ -10,8 +10,8 @@ use crate::tart::Tart;
 /// `dirtbag ssh [-- CMD...]` — interactive shell, or run a command.
 ///
 /// Returns the remote exit status as the process exit code.
-pub fn run(file: Option<&Path>, cmd: Vec<String>) -> Result<ExitCode> {
-    let project = Project::find(file)?;
+pub fn run(file: Option<&Path>, instance: Option<&str>, cmd: Vec<String>) -> Result<ExitCode> {
+    let project = Project::find(file, instance)?;
     let tart = Tart::locate()?;
     let ip = tart
         .ip(&project.vm_name())?

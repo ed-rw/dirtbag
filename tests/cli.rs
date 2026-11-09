@@ -71,6 +71,7 @@ fn help_lists_all_commands() {
         "destroy",
         "provision",
         "version",
+        "update",
     ] {
         assert!(text.contains(cmd), "help missing `{cmd}`:\n{text}");
     }
@@ -169,6 +170,28 @@ fn file_option_reports_a_missing_file() {
     let out = run_in(dir.path(), &["--file", "nope.toml", "status"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("nope.toml"));
+}
+
+#[test]
+fn instance_option_rejects_unsafe_names() {
+    let dir = tempdir().unwrap();
+    run_in(dir.path(), &["init"]);
+    let out = run_with_stub_tart(dir.path(), &["--instance", "a/b", "status"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("instance `a/b`"));
+}
+
+#[test]
+fn status_of_a_missing_instance_reports_not_created() {
+    let dir = tempdir().unwrap();
+    run_in(dir.path(), &["init"]);
+    let out = run_with_stub_tart(dir.path(), &["-i", "two", "status"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("not created"));
 }
 
 /// Full lifecycle against a real VM. Ignored by default; needs tart + a Linux
@@ -298,6 +321,89 @@ fn e2e_sibling_sandboxes_are_independent() {
     assert!(
         !dir.path().join(".dirtbag").exists(),
         "the shared state dir should be gone once both sandboxes are destroyed"
+    );
+}
+
+/// Two instances of one config file run as separate VMs. Each has its own
+/// name, run log and guest disk, and `status` without `-i` lists both.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_instances_of_one_config_are_independent() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
+         [resources]\ncpu = 2\nmemory = 2048\n\
+         [[mount]]\nname = \"project\"\nsource = \".\"\ntarget = \"/opt/project\"\n",
+    )
+    .unwrap();
+    let run_two = |args: &[&str]| {
+        let a: Vec<&str> = ["-i", "two"].iter().chain(args).copied().collect();
+        run_in(dir.path(), &a)
+    };
+
+    let up_base = run_in(dir.path(), &["up"]);
+    assert!(
+        up_base.status.success(),
+        "base up failed: {}",
+        String::from_utf8_lossy(&up_base.stderr)
+    );
+    let up_two = run_two(&["up"]);
+    assert!(
+        up_two.status.success(),
+        "instance up failed: {}",
+        String::from_utf8_lossy(&up_two.stderr)
+    );
+
+    let name_base = vm_name_from_up(&up_base);
+    let name_two = vm_name_from_up(&up_two);
+    assert_eq!(name_two, format!("{name_base}-two"));
+    assert!(dir.path().join(".dirtbag/run.log").is_file());
+    assert!(dir.path().join(".dirtbag/two.run.log").is_file());
+
+    // Both instances mount the same host directory.
+    assert!(
+        run_two(&["ssh", "--", "ls", "/opt/project/dirtbag.toml"])
+            .status
+            .success(),
+        "instance missing the shared mount"
+    );
+
+    // A guest file in one instance does not appear in the other, so each
+    // instance has its own disk.
+    assert!(
+        run_two(&["ssh", "--", "touch", "/tmp/only-two"])
+            .status
+            .success()
+    );
+    assert!(
+        !run_in(dir.path(), &["ssh", "--", "ls", "/tmp/only-two"])
+            .status
+            .success(),
+        "base VM should not see the instance's guest file"
+    );
+
+    let status = run_in(dir.path(), &["status"]);
+    let status_out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_out.contains(&name_base) && status_out.contains(&name_two),
+        "status should list both instances:\n{status_out}"
+    );
+
+    // Destroy the instance. The base VM keeps running with its log intact.
+    assert!(run_two(&["destroy"]).status.success());
+    assert!(
+        String::from_utf8_lossy(&run_two(&["status"]).stdout).contains("not created"),
+        "instance should be gone after destroy"
+    );
+    assert!(!dir.path().join(".dirtbag/two.run.log").exists());
+    assert!(dir.path().join(".dirtbag/run.log").is_file());
+    assert!(run_in(dir.path(), &["ssh", "--", "true"]).status.success());
+
+    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert!(
+        !dir.path().join(".dirtbag").exists(),
+        "the state dir should be gone once both instances are destroyed"
     );
 }
 

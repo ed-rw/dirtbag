@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::config::Project;
 use crate::process;
 use crate::ssh::{SSH_PORT, Ssh};
-use crate::tart::{Tart, run_args};
+use crate::tart::{Tart, Vm, run_args};
 
 const IP_TIMEOUT: Duration = Duration::from_secs(180);
 const SSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -24,8 +24,8 @@ fn is_running(tart: &Tart, name: &str) -> Result<bool> {
     Ok(tart.get(name)?.map(|v| v.running).unwrap_or(false))
 }
 
-pub fn up(file: Option<&Path>) -> Result<()> {
-    let project = Project::find(file)?;
+pub fn up(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
+    let project = Project::find(file, instance)?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
@@ -63,7 +63,7 @@ pub fn up(file: Option<&Path>) -> Result<()> {
         Some(pid)
     };
 
-    let ip = wait_for_ip(&tart, &name, pid)?;
+    let ip = wait_for_ip(&tart, &name, pid, &project.run_log())?;
 
     // Configure the guest only when we just booted it.
     if pid.is_some() {
@@ -108,12 +108,12 @@ fn configure_boot(project: &Project, ip: &str) -> Result<()> {
 
 /// `dirtbag reload` — bring the VM down (if running) and back up so mount and
 /// resource changes take effect.
-pub fn reload(file: Option<&Path>) -> Result<()> {
-    down(file)?;
-    up(file)
+pub fn reload(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
+    down(file, instance)?;
+    up(file, instance)
 }
 
-fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
+fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>, log: &Path) -> Result<String> {
     let start = Instant::now();
     loop {
         if let Some(ip) = tart.ip(name)? {
@@ -123,7 +123,10 @@ fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
         if let Some(pid) = pid
             && !process::is_alive(pid)
         {
-            bail!("tart run (pid {pid}) exited before the VM got an IP; see .dirtbag/run.log");
+            bail!(
+                "tart run (pid {pid}) exited before the VM got an IP; see {}",
+                log.display()
+            );
         }
         if start.elapsed() > IP_TIMEOUT {
             bail!(
@@ -135,8 +138,8 @@ fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>) -> Result<String> {
     }
 }
 
-pub fn down(file: Option<&Path>) -> Result<()> {
-    let project = Project::find(file)?;
+pub fn down(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
+    let project = Project::find(file, instance)?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
@@ -168,8 +171,8 @@ fn shutdown_guest(tart: &Tart, project: &Project, name: &str) -> Result<()> {
     crate::provision::run_on_shutdown(&ssh, project)
 }
 
-pub fn destroy(file: Option<&Path>) -> Result<()> {
-    let project = Project::find(file)?;
+pub fn destroy(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
+    let project = Project::find(file, instance)?;
     let tart = Tart::locate()?;
     let name = project.vm_name();
 
@@ -195,16 +198,22 @@ pub fn destroy(file: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-pub fn status(file: Option<&Path>) -> Result<()> {
+pub fn status(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
     // With an explicit `--file`, report that project and surface any load error.
     // Without one, discover from the cwd and fall back to a global VM listing.
-    if file.is_some() {
-        return project_status(&Project::find(file)?);
-    }
-    let cwd = std::env::current_dir().context("resolving current directory")?;
-    match Project::discover(&cwd) {
-        Ok(project) => project_status(&project),
-        Err(_) => global_status(),
+    let project = if file.is_some() {
+        Project::find(file, instance)?
+    } else {
+        let cwd = std::env::current_dir().context("resolving current directory")?;
+        match Project::discover(&cwd) {
+            Ok(project) => project.with_instance(instance)?,
+            Err(_) => return global_status(),
+        }
+    };
+    if project.instance.is_some() {
+        project_status(&project)
+    } else {
+        instances_status(&project)
     }
 }
 
@@ -226,6 +235,21 @@ fn project_status(project: &Project) -> Result<()> {
     Ok(())
 }
 
+/// List the config's base VM and all of its instances.
+fn instances_status(project: &Project) -> Result<()> {
+    let tart = Tart::locate()?;
+    let vms: Vec<Vm> = tart
+        .list()?
+        .into_iter()
+        .filter(|vm| project.owns_vm(&vm.name))
+        .collect();
+    if vms.is_empty() {
+        println!("not created — run `dirtbag up`");
+        return Ok(());
+    }
+    print_vms(&tart, &vms)
+}
+
 /// Fallback used outside a project: list all local Tart VMs.
 fn global_status() -> Result<()> {
     let tart = Tart::locate()?;
@@ -234,8 +258,12 @@ fn global_status() -> Result<()> {
         println!("No Tart VMs found.");
         return Ok(());
     }
+    print_vms(&tart, &vms)
+}
+
+fn print_vms(tart: &Tart, vms: &[Vm]) -> Result<()> {
     println!("{:<28} {:<10} IP", "NAME", "STATE");
-    for vm in &vms {
+    for vm in vms {
         let ip = if vm.running {
             tart.ip(&vm.name)?.unwrap_or_default()
         } else {

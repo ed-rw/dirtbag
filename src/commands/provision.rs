@@ -7,8 +7,8 @@ use crate::ssh::{SSH_PORT, Ssh};
 use crate::tart::Tart;
 
 /// `dirtbag provision` — re-run provisioners against the running VM.
-pub fn run(file: Option<&Path>) -> Result<()> {
-    let project = Project::find(file)?;
+pub fn run(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
+    let project = Project::find(file, instance)?;
     let tart = Tart::locate()?;
     let ip = tart
         .ip(&project.vm_name())?
