@@ -140,6 +140,11 @@ impl Tart {
         Ok(Self { bin })
     }
 
+    /// Use the `tart` executable at `bin`.
+    pub fn at(bin: PathBuf) -> Self {
+        Self { bin }
+    }
+
     pub fn bin(&self) -> &PathBuf {
         &self.bin
     }

@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::config::Project;
+use crate::forward::{self, Forward};
 use crate::process;
 use crate::ssh::{SSH_PORT, Ssh};
 use crate::tart::{Tart, Vm, run_args};
@@ -31,6 +32,11 @@ pub fn up(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
 
     for (mount, path) in project.missing_mount_sources()? {
         warn!(mount = %mount, path = %path, "mount source does not exist on host");
+    }
+
+    // Check the host ports before the clone, so a busy port leaves no new VM.
+    if !is_running(&tart, &name)? {
+        forward::reserve(&project.config.network.forward)?;
     }
 
     if tart.get(&name)?.is_none() {
@@ -53,14 +59,10 @@ pub fn up(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
     // fast-fail below and is never persisted (a saved PID can be reused).
     let pid = if is_running(&tart, &name)? {
         info!(vm = %name, "already running");
+        warn_forward_drift(&project, &name)?;
         None
     } else {
-        std::fs::create_dir_all(project.dirtbag_dir())
-            .with_context(|| format!("creating {}", project.dirtbag_dir().display()))?;
-        let args = run_args(&name, &project.dir_shares()?, true);
-        let pid = process::spawn_detached(tart.bin(), &args, &project.run_log())?;
-        info!(vm = %name, pid, "started detached tart run");
-        Some(pid)
+        Some(start_supervisor(&project, &tart, &name)?)
     };
 
     let ip = wait_for_ip(&tart, &name, pid, &project.run_log())?;
@@ -71,6 +73,48 @@ pub fn up(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
     }
 
     println!("VM `{name}` is up at {ip}");
+    for f in running_forwards(&name)? {
+        println!("forward {}", forward::label(&f));
+    }
+    Ok(())
+}
+
+/// Start the VM detached, under a supervisor that forwards the host ports.
+/// Give each auto forward a free host port first.
+fn start_supervisor(project: &Project, tart: &Tart, name: &str) -> Result<u32> {
+    std::fs::create_dir_all(project.dirtbag_dir())
+        .with_context(|| format!("creating {}", project.dirtbag_dir().display()))?;
+    let forwards = forward::reserve(&project.config.network.forward)?;
+    let exe = std::env::current_exe().context("finding the dirtbag binary")?;
+    let args = forward::supervise_args(
+        name,
+        &forwards,
+        &tart.bin().to_string_lossy(),
+        &run_args(name, &project.dir_shares()?, true),
+    );
+    let pid = process::spawn_detached(&exe, &args, &project.run_log())?;
+    info!(vm = %name, pid, "started detached VM supervisor");
+    Ok(pid)
+}
+
+/// The forwards of the supervisor for `name`, or none if no supervisor runs.
+fn running_forwards(name: &str) -> Result<Vec<Forward>> {
+    Ok(forward::supervisor_for(name)?
+        .map(|s| s.forwards)
+        .unwrap_or_default())
+}
+
+/// Forwards change only when the supervisor starts. Warn if the running ones
+/// do not match the config.
+fn warn_forward_drift(project: &Project, name: &str) -> Result<()> {
+    let want = &project.config.network.forward;
+    let running = running_forwards(name)?;
+    let same = want.len() == running.len() && want.iter().zip(&running).all(|(w, r)| w.matches(r));
+    if !same {
+        warn!(
+            "the running port forwards do not match the config; run `dirtbag reload` to apply them"
+        );
+    }
     Ok(())
 }
 
@@ -124,7 +168,7 @@ fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>, log: &Path) -> Result<
             && !process::is_alive(pid)
         {
             bail!(
-                "tart run (pid {pid}) exited before the VM got an IP; see {}",
+                "the VM process (pid {pid}) exited before the VM got an IP; see {}",
                 log.display()
             );
         }
@@ -232,6 +276,9 @@ fn project_status(project: &Project) -> Result<()> {
     {
         println!("ip:    {ip}");
     }
+    for f in running_forwards(&name)? {
+        println!("forward: {}", forward::label(&f));
+    }
     Ok(())
 }
 
@@ -262,14 +309,26 @@ fn global_status() -> Result<()> {
 }
 
 fn print_vms(tart: &Tart, vms: &[Vm]) -> Result<()> {
-    println!("{:<28} {:<10} IP", "NAME", "STATE");
+    let supervisors = forward::supervisors()?;
+    println!("{:<28} {:<10} {:<16} FORWARDS", "NAME", "STATE", "IP");
     for vm in vms {
         let ip = if vm.running {
             tart.ip(&vm.name)?.unwrap_or_default()
         } else {
             String::new()
         };
-        println!("{:<28} {:<10} {}", vm.name, vm.state, ip);
+        let forwards = supervisors
+            .iter()
+            .find(|s| s.vm == vm.name)
+            .map(|s| {
+                s.forwards
+                    .iter()
+                    .map(forward::label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        println!("{:<28} {:<10} {:<16} {}", vm.name, vm.state, ip, forwards);
     }
     Ok(())
 }

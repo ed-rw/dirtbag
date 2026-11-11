@@ -407,6 +407,176 @@ fn e2e_instances_of_one_config_are_independent() {
     );
 }
 
+/// A config with port forwards, on the cached Ubuntu image.
+fn forward_config(forwards: &str) -> String {
+    format!(
+        "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
+         [resources]\ncpu = 2\nmemory = 2048\n\
+         [network]\nforward = [{forwards}]\n"
+    )
+}
+
+/// The host ports from the `forward 127.0.0.1:PORT -> GUEST` lines of `up`.
+fn forwarded_ports(out: &Output) -> Vec<u16> {
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("forward "))
+        .map(|l| {
+            let host = l.split(" -> ").next().unwrap();
+            host.rsplit(':').next().unwrap().parse().unwrap()
+        })
+        .collect()
+}
+
+/// Read the SSH banner through a forwarded host port. The guest's sshd
+/// listens on port 22, so a banner proves the relay reaches the guest.
+fn ssh_banner(port: u16) -> String {
+    use std::io::Read;
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut buf = [0u8; 64];
+    let n = s.read(&mut buf).unwrap();
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// A free host port, released again for the test to use.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Auto ports (`0:GUEST`) give each instance its own host port, and each one
+/// reaches its own guest.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_auto_forwards_give_each_instance_a_port() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("dirtbag.toml"), forward_config("\"0:22\"")).unwrap();
+
+    let up_base = run_in(dir.path(), &["up"]);
+    assert!(
+        up_base.status.success(),
+        "base up failed: {}",
+        String::from_utf8_lossy(&up_base.stderr)
+    );
+    let up_two = run_in(dir.path(), &["-i", "two", "up"]);
+    assert!(
+        up_two.status.success(),
+        "instance up failed: {}",
+        String::from_utf8_lossy(&up_two.stderr)
+    );
+
+    let (base_ports, two_ports) = (forwarded_ports(&up_base), forwarded_ports(&up_two));
+    assert_eq!(base_ports.len(), 1, "{base_ports:?}");
+    assert_eq!(two_ports.len(), 1, "{two_ports:?}");
+    assert_ne!(base_ports[0], two_ports[0]);
+    for port in [base_ports[0], two_ports[0]] {
+        let banner = ssh_banner(port);
+        assert!(banner.starts_with("SSH-2.0"), "port {port}: {banner:?}");
+    }
+
+    let status = String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout).into_owned();
+    for port in [base_ports[0], two_ports[0]] {
+        assert!(
+            status.contains(&format!("127.0.0.1:{port} -> 22")),
+            "status should show port {port}:\n{status}"
+        );
+    }
+
+    let two_status =
+        String::from_utf8_lossy(&run_in(dir.path(), &["-i", "two", "status"]).stdout).into_owned();
+    assert!(
+        two_status.contains(&format!("forward: 127.0.0.1:{} -> 22", two_ports[0])),
+        "{two_status}"
+    );
+
+    // A changed forward list applies only on reload, so `up` warns.
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        forward_config("\"0:22\", \"0:80\""),
+    )
+    .unwrap();
+    let again = run_in(dir.path(), &["up"]);
+    assert!(again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("dirtbag reload"),
+        "stderr: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    assert!(
+        run_in(dir.path(), &["-i", "two", "destroy"])
+            .status
+            .success()
+    );
+    assert!(run_in(dir.path(), &["destroy"]).status.success());
+}
+
+/// A fixed host port belongs to one VM at a time. A second instance fails
+/// before it clones, and `down` releases the port.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_fixed_forward_conflicts_fail_fast_and_down_releases_the_port() {
+    let dir = tempdir().unwrap();
+    let port = free_port();
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        forward_config(&format!("\"{port}:22\"")),
+    )
+    .unwrap();
+
+    let up = run_in(dir.path(), &["up"]);
+    assert!(
+        up.status.success(),
+        "up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let name = vm_name_from_up(&up);
+    assert!(ssh_banner(port).starts_with("SSH-2.0"));
+    assert!(
+        String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout)
+            .contains(&format!("127.0.0.1:{port} -> 22"))
+    );
+
+    let clash = run_in(dir.path(), &["-i", "two", "up"]);
+    assert!(
+        !clash.status.success(),
+        "a second instance must not take the port"
+    );
+    assert!(
+        String::from_utf8_lossy(&clash.stderr).contains("not available"),
+        "stderr: {}",
+        String::from_utf8_lossy(&clash.stderr)
+    );
+    let list = Command::new("tart").arg("list").output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&list.stdout).contains(&format!("{name}-two")),
+        "the failed instance should not have been cloned"
+    );
+
+    assert!(run_in(dir.path(), &["down"]).status.success());
+    let released = (0..10).any(|_| {
+        port_is_free(port) || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            false
+        }
+    });
+    assert!(released, "down should release host port {port}");
+
+    // The forward comes back on the next boot.
+    assert!(run_in(dir.path(), &["up"]).status.success());
+    assert!(ssh_banner(port).starts_with("SSH-2.0"));
+    assert!(run_in(dir.path(), &["destroy"]).status.success());
+}
+
 /// Extract the VM name from an `up` success line: ``VM `name` is up at IP``.
 fn vm_name_from_up(out: &Output) -> String {
     let stdout = String::from_utf8_lossy(&out.stdout);

@@ -48,6 +48,11 @@ privileged = true
 # [[on-boot]]
 # inline = "systemctl --user start my-agent"
 
+# Forward host ports to the guest as "[bind:]host:guest". `bind` defaults to
+# 127.0.0.1. Host port 0 picks a free port; `dirtbag status` shows it.
+# [network]
+# forward = ["8080:80"]
+
 # SSH defaults to admin:admin (the Tart image default); omit [ssh] to accept it.
 # [ssh]
 # user     = "admin"

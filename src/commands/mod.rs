@@ -4,6 +4,7 @@ mod init;
 mod lifecycle;
 mod provision;
 mod ssh;
+mod supervise;
 mod update;
 mod version;
 
@@ -29,6 +30,11 @@ pub fn dispatch(command: Command, file: Option<&Path>, instance: Option<&str>) -
         Command::Provision => provision::run(file, instance).map(ok),
         Command::Version => version::run().map(ok),
         Command::Update => update::run().map(ok),
+        Command::Supervise {
+            vm,
+            forwards,
+            child,
+        } => supervise::run(&vm, &forwards, &child),
     }
 }
 

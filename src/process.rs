@@ -1,4 +1,4 @@
-//! Start and track the detached `tart run` process.
+//! Start and track the detached VM process.
 
 use std::fs::File;
 use std::os::unix::process::CommandExt;
@@ -9,14 +9,14 @@ use anyhow::{Context, Result};
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 
-/// Spawn `tart_bin` detached from the current session. Write stdout and stderr
+/// Spawn `program` detached from the current session. Write stdout and stderr
 /// to `log_path`. Return the child PID.
-pub fn spawn_detached(tart_bin: &Path, args: &[String], log_path: &Path) -> Result<u32> {
+pub fn spawn_detached(program: &Path, args: &[String], log_path: &Path) -> Result<u32> {
     let log =
         File::create(log_path).with_context(|| format!("creating log {}", log_path.display()))?;
     let log_err = log.try_clone().context("duplicating log handle")?;
 
-    let mut cmd = Command::new(tart_bin);
+    let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -41,7 +41,7 @@ pub fn spawn_detached(tart_bin: &Path, args: &[String], log_path: &Path) -> Resu
 
     let child = cmd
         .spawn()
-        .with_context(|| format!("spawning {}", tart_bin.display()))?;
+        .with_context(|| format!("spawning {}", program.display()))?;
     Ok(child.id())
 }
 

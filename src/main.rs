@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod error;
+mod forward;
 mod guest;
 mod process;
 mod provision;
