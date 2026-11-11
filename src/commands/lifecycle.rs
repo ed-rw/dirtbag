@@ -20,6 +20,9 @@ use crate::tart::{Tart, Vm, run_args};
 const IP_TIMEOUT: Duration = Duration::from_secs(180);
 const SSH_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Longer than the supervisor waits for a bind address to exist.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(90);
+const FORWARD_POLL: Duration = Duration::from_millis(250);
 
 fn is_running(tart: &Tart, name: &str) -> Result<bool> {
     Ok(tart.get(name)?.map(|v| v.running).unwrap_or(false))
@@ -68,7 +71,8 @@ pub fn up(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
     let ip = wait_for_ip(&tart, &name, pid, &project.run_log())?;
 
     // Configure the guest only when we just booted it.
-    if pid.is_some() {
+    if let Some(pid) = pid {
+        wait_for_forwards(&name, pid, &project.run_log())?;
         configure_boot(&project, &ip)?;
     }
 
@@ -155,6 +159,38 @@ fn configure_boot(project: &Project, ip: &str) -> Result<()> {
 pub fn reload(file: Option<&Path>, instance: Option<&str>) -> Result<()> {
     down(file, instance)?;
     up(file, instance)
+}
+
+/// Wait until the supervisor listens on each forward. It binds an address
+/// that the VM network creates only after the boot. If a bind fails, the
+/// supervisor stops the VM and exits.
+fn wait_for_forwards(name: &str, pid: u32, log: &Path) -> Result<()> {
+    let forwards = running_forwards(name)?;
+    let start = Instant::now();
+    loop {
+        let waiting: Vec<_> = forwards
+            .iter()
+            .filter(|f| !forward::is_listening(f))
+            .collect();
+        if !process::is_alive(pid) {
+            bail!(
+                "the VM supervisor (pid {pid}) exited, so the port forwards are not available; see {}",
+                log.display()
+            );
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        if start.elapsed() > FORWARD_TIMEOUT {
+            let labels: Vec<_> = waiting.iter().map(|f| f.to_string()).collect();
+            bail!(
+                "timed out waiting for forwards {}; see {}",
+                labels.join(", "),
+                log.display()
+            );
+        }
+        std::thread::sleep(FORWARD_POLL);
+    }
 }
 
 fn wait_for_ip(tart: &Tart, name: &str, pid: Option<u32>, log: &Path) -> Result<String> {

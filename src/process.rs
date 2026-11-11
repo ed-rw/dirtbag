@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use nix::sys::signal::kill;
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 
 /// Spawn `program` detached from the current session. Write stdout and stderr
@@ -45,7 +46,32 @@ pub fn spawn_detached(program: &Path, args: &[String], log_path: &Path) -> Resul
     Ok(child.id())
 }
 
-/// Return true if a process with `pid` exists.
+/// Return true if a process with `pid` exists. Reap it if it is an exited
+/// child of this process. Otherwise it stays as a zombie, which `kill` still
+/// finds.
 pub fn is_alive(pid: u32) -> bool {
-    kill(Pid::from_raw(pid as i32), None).is_ok()
+    let pid = Pid::from_raw(pid as i32);
+    match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+        Ok(WaitStatus::StillAlive) => true,
+        Ok(_) => false,
+        Err(_) => kill(pid, None).is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::zombie_processes, reason = "is_alive reaps the child")]
+    fn an_exited_child_is_not_alive() {
+        let child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let start = std::time::Instant::now();
+        while is_alive(pid) {
+            assert!(start.elapsed().as_secs() < 5, "child {pid} still alive");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(is_alive(std::process::id()));
+    }
 }

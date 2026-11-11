@@ -21,6 +21,11 @@ pub const SUPERVISE: &str = "__supervise";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const GUEST_IP_TIMEOUT: Duration = Duration::from_secs(30);
 const GUEST_IP_POLL: Duration = Duration::from_secs(1);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const BIND_RETRY_DELAY: Duration = Duration::from_millis(200);
+const KEEPALIVE_IDLE_SECS: u32 = 60;
+const KEEPALIVE_INTERVAL_SECS: u32 = 10;
+const KEEPALIVE_PROBES: u32 = 6;
 
 /// One forward: `[bind:]host:guest`. A `host` port of 0 means "pick a free
 /// port" until [`reserve`] replaces it with a real one.
@@ -111,20 +116,84 @@ pub fn validate(forwards: &[Forward]) -> Result<()> {
 /// Check that each fixed host port is free, and give each auto port a free
 /// port. Return the forwards with real host ports. The ports are released
 /// again, so the supervisor can bind them.
+///
+/// A bind address that does not exist yet is not an error. The supervisor
+/// binds it after the boot (see [`bind_when_available`]). Its fixed port is
+/// not checked, and its auto port is a port that is free on all addresses.
 pub fn reserve(forwards: &[Forward]) -> Result<Vec<Forward>> {
     forwards
         .iter()
         .map(|f| {
-            let listener = TcpListener::bind(f.host_addr()).with_context(|| {
-                format!(
-                    "host port {} for forward `{f}` is not available",
-                    f.host_addr()
-                )
-            })?;
-            let host = listener.local_addr()?.port();
+            let probe = match TcpListener::bind(f.host_addr()) {
+                Err(e) if is_not_available_yet(&e) && f.host == 0 => {
+                    debug!(forward = %f, "bind address does not exist yet");
+                    TcpListener::bind(SocketAddr::new(unspecified(f.bind), 0))
+                }
+                Err(e) if is_not_available_yet(&e) => {
+                    debug!(forward = %f, "bind address does not exist yet");
+                    return Ok(*f);
+                }
+                result => result,
+            };
+            let host = probe
+                .with_context(|| {
+                    format!(
+                        "host port {} for forward `{f}` is not available",
+                        f.host_addr()
+                    )
+                })?
+                .local_addr()?
+                .port();
             Ok(Forward { host, ..*f })
         })
         .collect()
+}
+
+/// True if a bind failed because the address does not exist on the host yet.
+/// macOS creates the VM network interface, such as bridge100 at 192.168.64.1,
+/// when the first VM starts, and removes it after the last VM stops.
+pub fn is_not_available_yet(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::AddrNotAvailable
+}
+
+fn unspecified(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+        IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+    }
+}
+
+/// Bind `f`. While its address does not exist on the host, try again until
+/// `timeout`. Any other error stops at once.
+pub fn bind_when_available(f: &Forward, timeout: Duration) -> Result<TcpListener> {
+    let start = Instant::now();
+    loop {
+        match TcpListener::bind(f.host_addr()) {
+            Err(e) if is_not_available_yet(&e) && start.elapsed() < timeout => {
+                std::thread::sleep(BIND_RETRY_DELAY);
+            }
+            result => {
+                return result
+                    .with_context(|| format!("binding {} for forward `{f}`", f.host_addr()));
+            }
+        }
+    }
+}
+
+/// True if a listener accepts connections on the host address of `f`.
+pub fn is_listening(f: &Forward) -> bool {
+    let addr = match f.bind {
+        ip if ip.is_unspecified() => SocketAddr::new(loopback(ip), f.host),
+        _ => f.host_addr(),
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+}
+
+fn loopback(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => Ipv4Addr::LOCALHOST.into(),
+        IpAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+    }
 }
 
 /// Accept connections on `listener` and relay each one to `guest` on the IP
@@ -138,7 +207,10 @@ where
         let client = match conn {
             Ok(c) => c,
             Err(e) => {
+                // An error such as EMFILE stays until a connection closes.
+                // Wait, so that the loop does not spin.
                 warn!("accept failed: {e}");
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
                 continue;
             }
         };
@@ -156,8 +228,21 @@ where
     F: Fn(bool) -> Option<IpAddr>,
 {
     let upstream = connect_guest(guest, &guest_ip)?;
+    for stream in [&client, &upstream] {
+        enable_keepalive(stream).context("enabling TCP keepalive")?;
+    }
     relay(client, upstream)?;
     Ok(())
+}
+
+/// Send keepalive probes on an idle connection. A guest that stops or
+/// changes IP then closes the relay, and its threads and sockets go away.
+fn enable_keepalive(stream: &TcpStream) -> nix::Result<()> {
+    use nix::sys::socket::{setsockopt, sockopt};
+    setsockopt(stream, sockopt::KeepAlive, &true)?;
+    setsockopt(stream, sockopt::TcpKeepAlive, &KEEPALIVE_IDLE_SECS)?;
+    setsockopt(stream, sockopt::TcpKeepInterval, &KEEPALIVE_INTERVAL_SECS)?;
+    setsockopt(stream, sockopt::TcpKeepCount, &KEEPALIVE_PROBES)
 }
 
 /// Connect to the guest port. Wait for the guest to get an IP, and look the IP
@@ -375,6 +460,68 @@ mod tests {
 
     /// Relay a round trip through [`serve`] to a local echo server that
     /// stands in for the guest.
+    // 192.0.2.0/24 is a documentation range, so no host interface has it.
+    const ABSENT: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
+    #[test]
+    fn reserve_accepts_bind_addresses_that_do_not_exist_yet() {
+        let fixed = Forward {
+            bind: ABSENT,
+            host: 3000,
+            guest: 3000,
+        };
+        let auto = Forward {
+            bind: ABSENT,
+            host: 0,
+            guest: 80,
+        };
+        let reserved = reserve(&[fixed, auto]).unwrap();
+        assert_eq!(reserved[0], fixed);
+        assert_ne!(reserved[1].host, 0);
+    }
+
+    #[test]
+    fn bind_when_available_gives_up_after_the_timeout() {
+        let f = Forward {
+            bind: ABSENT,
+            host: 3000,
+            guest: 3000,
+        };
+        let err = bind_when_available(&f, Duration::ZERO).unwrap_err();
+        assert!(format!("{err:#}").contains("192.0.2.1:3000"), "{err:#}");
+    }
+
+    #[test]
+    fn bind_when_available_fails_at_once_on_a_busy_port() {
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let f = Forward {
+            bind: Ipv4Addr::LOCALHOST.into(),
+            host: held.local_addr().unwrap().port(),
+            guest: 80,
+        };
+        let start = Instant::now();
+        assert!(bind_when_available(&f, Duration::from_secs(30)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(is_listening(&f));
+    }
+
+    #[test]
+    fn keepalive_is_on_with_short_probes() {
+        use nix::sys::socket::{getsockopt, sockopt};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        enable_keepalive(&stream).unwrap();
+        assert!(getsockopt(&stream, sockopt::KeepAlive).unwrap());
+        assert_eq!(
+            getsockopt(&stream, sockopt::TcpKeepAlive).unwrap(),
+            KEEPALIVE_IDLE_SECS
+        );
+        assert_eq!(
+            getsockopt(&stream, sockopt::TcpKeepCount).unwrap(),
+            KEEPALIVE_PROBES
+        );
+    }
+
     #[test]
     fn serve_relays_to_the_guest_and_back() {
         let echo = TcpListener::bind("127.0.0.1:0").unwrap();

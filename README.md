@@ -135,7 +135,9 @@ inline = "systemctl --user stop my-agent"
 # `bind` defaults to 127.0.0.1; set it to 0.0.0.0 to expose a port to the LAN.
 # Host port 0 picks a free port at `up` (shown by `up` and `status`), so
 # several `-i` instances can forward the same guest port. A fixed host port
-# that is in use stops `up` before it clones or boots. Forward changes apply on
+# that is in use stops `up` before it clones or boots. A bind address that the
+# VM network creates, such as 192.168.64.1 (bridge100), can exist only after a
+# VM boots, so the supervisor binds it after the boot. Forward changes apply on
 # `dirtbag reload`.
 [network]
 forward = ["8080:80", "0:5432", "0.0.0.0:2222:22"]

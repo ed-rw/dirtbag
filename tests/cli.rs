@@ -474,8 +474,12 @@ fn forwarded_ports(out: &Output) -> Vec<u16> {
 /// Read the SSH banner through a forwarded host port. The guest's sshd
 /// listens on port 22, so a banner proves the relay reaches the guest.
 fn ssh_banner(port: u16) -> String {
+    ssh_banner_at("127.0.0.1", port)
+}
+
+fn ssh_banner_at(host: &str, port: u16) -> String {
     use std::io::Read;
-    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut s = std::net::TcpStream::connect((host, port)).unwrap();
     s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
         .unwrap();
     let mut buf = [0u8; 64];
@@ -565,6 +569,29 @@ fn e2e_auto_forwards_give_each_instance_a_port() {
         "instance destroy",
     );
     assert_ok(&run_in(dir.path(), &["destroy"]), "base destroy");
+}
+
+/// macOS creates the VM network address 192.168.64.1 only when a VM starts.
+/// A forward on it binds after the boot, even when no other VM runs.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_forward_on_the_vm_network_address_binds_after_boot() {
+    let _slot = vm_slot();
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        forward_config("\"192.168.64.1:0:22\""),
+    )
+    .unwrap();
+
+    let up = run_in(dir.path(), &["up"]);
+    assert_ok(&up, "up");
+    let ports = forwarded_ports(&up);
+    assert_eq!(ports.len(), 1, "{ports:?}");
+    let banner = ssh_banner_at("192.168.64.1", ports[0]);
+    assert!(banner.starts_with("SSH-2.0"), "{banner:?}");
+
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
 }
 
 /// A fixed host port belongs to one VM at a time. A second instance fails
