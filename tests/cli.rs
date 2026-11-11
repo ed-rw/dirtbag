@@ -23,15 +23,18 @@ fn run_in(dir: &Path, args: &[&str]) -> Output {
         .expect("spawning dirtbag")
 }
 
-/// Write a stub `tart` that reports no VMs: `list` gives an empty set and every
-/// other subcommand fails, which is what a real `tart` does for a VM that was
-/// never created.
+/// Write a stub `tart` that reports no VMs: `list` gives an empty set, `get`
+/// reports that the VM does not exist, and every other subcommand fails. A real
+/// `tart` does the same for a VM that was never created.
 fn stub_tart() -> TempDir {
     let dir = tempdir().unwrap();
     let bin = dir.path().join("tart");
     std::fs::write(
         &bin,
-        "#!/bin/sh\ncase \"$1\" in\nlist) echo '[]' ;;\n*) exit 1 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n\
+         list) echo '[]' ;;\n\
+         get) echo \"the specified VM \\\"$2\\\" does not exist\" >&2; exit 2 ;;\n\
+         *) exit 1 ;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
