@@ -5,10 +5,14 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::error::TartError;
+
+const LIST_ATTEMPTS: u32 = 5;
+const LIST_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// A VM from `tart list --format json`. serde ignores the other JSON fields
 /// (Disk, Size, Accessed, …).
@@ -172,8 +176,22 @@ impl Tart {
         Ok(self.checked(&version_args())?.trim().to_string())
     }
 
+    /// List the local VMs. Try again after a short delay if `tart list` fails.
+    /// It fails while another VM is part-way through a clone or delete, because
+    /// that VM's directory has no `config.json` yet or any more.
     pub fn list(&self) -> Result<Vec<Vm>, TartError> {
-        parse_list(&self.checked(&list_args())?)
+        let mut attempt = 1;
+        loop {
+            match self.checked(&list_args()) {
+                Ok(json) => return parse_list(&json),
+                Err(TartError::Command { .. }) if attempt < LIST_ATTEMPTS => {
+                    tracing::debug!(attempt, "tart list failed; trying again");
+                    std::thread::sleep(LIST_RETRY_DELAY);
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Look up a single VM by name, if it exists locally.

@@ -228,7 +228,7 @@ fn e2e_up_ssh_destroy() {
     assert!(ls.status.success());
 
     let destroy = run_in(dir.path(), &["destroy"]);
-    assert!(destroy.status.success());
+    assert_ok(&destroy, "destroy");
     assert!(!dir.path().join(".dirtbag").exists());
 }
 
@@ -298,7 +298,7 @@ fn e2e_sibling_sandboxes_are_independent() {
     );
 
     // Destroy the default; the sibling keeps running with its log intact.
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
     assert!(
         String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout).contains("not created"),
         "main VM should be gone after destroy"
@@ -317,7 +317,7 @@ fn e2e_sibling_sandboxes_are_independent() {
 
     // The sibling still works end to end, then destroys cleanly.
     assert!(run_gpu(&["ssh", "--", "true"]).status.success());
-    assert!(run_gpu(&["destroy"]).status.success());
+    assert_ok(&run_gpu(&["destroy"]), "destroy");
     assert!(
         !dir.path().join(".dirtbag").exists(),
         "the shared state dir should be gone once both sandboxes are destroyed"
@@ -391,7 +391,7 @@ fn e2e_instances_of_one_config_are_independent() {
     );
 
     // Destroy the instance. The base VM keeps running with its log intact.
-    assert!(run_two(&["destroy"]).status.success());
+    assert_ok(&run_two(&["destroy"]), "destroy");
     assert!(
         String::from_utf8_lossy(&run_two(&["status"]).stdout).contains("not created"),
         "instance should be gone after destroy"
@@ -400,7 +400,7 @@ fn e2e_instances_of_one_config_are_independent() {
     assert!(dir.path().join(".dirtbag/run.log").is_file());
     assert!(run_in(dir.path(), &["ssh", "--", "true"]).status.success());
 
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
     assert!(
         !dir.path().join(".dirtbag").exists(),
         "the state dir should be gone once both instances are destroyed"
@@ -505,19 +505,22 @@ fn e2e_auto_forwards_give_each_instance_a_port() {
     )
     .unwrap();
     let again = run_in(dir.path(), &["up"]);
-    assert!(again.status.success());
+    assert!(
+        again.status.success(),
+        "up after the config change failed: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&again.stderr).contains("dirtbag reload"),
         "stderr: {}",
         String::from_utf8_lossy(&again.stderr)
     );
 
-    assert!(
-        run_in(dir.path(), &["-i", "two", "destroy"])
-            .status
-            .success()
+    assert_ok(
+        &run_in(dir.path(), &["-i", "two", "destroy"]),
+        "instance destroy",
     );
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "base destroy");
 }
 
 /// A fixed host port belongs to one VM at a time. A second instance fails
@@ -574,7 +577,16 @@ fn e2e_fixed_forward_conflicts_fail_fast_and_down_releases_the_port() {
     // The forward comes back on the next boot.
     assert!(run_in(dir.path(), &["up"]).status.success());
     assert!(ssh_banner(port).starts_with("SSH-2.0"));
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
+}
+
+/// Assert that a dirtbag run succeeded. Show its stderr if it did not.
+fn assert_ok(out: &Output, what: &str) {
+    assert!(
+        out.status.success(),
+        "{what} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Extract the VM name from an `up` success line: ``VM `name` is up at IP``.
@@ -695,5 +707,5 @@ fn e2e_provision_runs_once_across_restarts() {
         "explicit provision should run the steps again"
     );
 
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
 }
