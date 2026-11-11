@@ -1,15 +1,52 @@
 //! CLI integration tests.
 //!
 //! These drive the built `dirtbag` binary. The default set needs no VM (config
-//! discovery, `init`, argument errors). The end-to-end test is `#[ignore]`d
-//! because it needs an Apple-Silicon host with `tart`, network access, and
-//! macOS Local Network permission; run it with `cargo test -- --ignored`.
+//! discovery, `init`, argument errors). The end-to-end tests are `#[ignore]`d
+//! because they need an Apple-Silicon host with `tart`, network access, and
+//! macOS Local Network permission; run them with `cargo test -- --ignored`.
+//! At most [`MAX_VM_TESTS`] of them run at the same time (see [`vm_slot`]).
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use tempfile::{TempDir, tempdir};
+
+/// The number of end-to-end tests that can run at the same time. When six VMs
+/// boot or restart together, some guests do not get a network, and the tests
+/// fail at random.
+const MAX_VM_TESTS: usize = 2;
+
+static VM_TESTS: Mutex<usize> = Mutex::new(0);
+static VM_SLOT_FREE: Condvar = Condvar::new();
+
+/// A permit to run VMs. The test holds it until it returns or panics.
+struct VmSlot;
+
+/// Wait until fewer than [`MAX_VM_TESTS`] end-to-end tests run, then take a
+/// slot. Call it first in each test, so the slot is released after the test
+/// cleans up.
+fn vm_slot() -> VmSlot {
+    let mut running = VM_SLOT_FREE
+        .wait_while(lock_vm_tests(), |n| *n >= MAX_VM_TESTS)
+        .unwrap_or_else(|e| e.into_inner());
+    *running += 1;
+    VmSlot
+}
+
+impl Drop for VmSlot {
+    fn drop(&mut self) {
+        *lock_vm_tests() -= 1;
+        VM_SLOT_FREE.notify_one();
+    }
+}
+
+/// Lock the counter. A panic cannot leave it wrong, because no code panics
+/// while it holds the lock, so ignore the poison flag.
+fn lock_vm_tests() -> MutexGuard<'static, usize> {
+    VM_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn dirtbag() -> Command {
     Command::new(env!("CARGO_BIN_EXE_dirtbag"))
@@ -202,6 +239,7 @@ fn status_of_a_missing_instance_reports_not_created() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_up_ssh_destroy() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("dirtbag.toml"),
@@ -241,6 +279,7 @@ fn e2e_up_ssh_destroy() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_sibling_sandboxes_are_independent() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     // Same image (pulled once), but a distinct mount tag per sandbox so an `ls`
     // inside each VM proves it booted from its own config.
@@ -332,6 +371,7 @@ fn e2e_sibling_sandboxes_are_independent() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_instances_of_one_config_are_independent() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("dirtbag.toml"),
@@ -461,6 +501,7 @@ fn port_is_free(port: u16) -> bool {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_auto_forwards_give_each_instance_a_port() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("dirtbag.toml"), forward_config("\"0:22\"")).unwrap();
 
@@ -531,6 +572,7 @@ fn e2e_auto_forwards_give_each_instance_a_port() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_fixed_forward_conflicts_fail_fast_and_down_releases_the_port() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     let port = free_port();
     std::fs::write(
@@ -607,6 +649,7 @@ fn vm_name_from_up(out: &Output) -> String {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_provision_runs_once_across_restarts() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     // Each provisioner run appends a line to one guest file; each on-boot run
     // appends to another. The line counts show provision runs once while
