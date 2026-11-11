@@ -131,6 +131,15 @@ inline = "systemctl --user start my-agent"
 [[on-shutdown]]
 inline = "systemctl --user stop my-agent"
 
+# TCP port forwards from the host to the guest, as "[bind:]host:guest".
+# `bind` defaults to 127.0.0.1; set it to 0.0.0.0 to expose a port to the LAN.
+# Host port 0 picks a free port at `up` (shown by `up` and `status`), so
+# several `-i` instances can forward the same guest port. A fixed host port
+# that is in use stops `up` before it clones or boots. Forward changes apply on
+# `dirtbag reload`.
+[network]
+forward = ["8080:80", "0:5432", "0.0.0.0:2222:22"]
+
 # Optional — defaults to admin:admin (the Tart image default).
 [ssh]
 user     = "admin"
@@ -189,12 +198,15 @@ Global flags:
 ## How it works
 
 - **Detached boot.** `tart run` runs in the foreground for the life of the VM,
-  so dirtbag spawns `tart run --no-graphics` in its own session (`setsid`), with
-  output redirected to `.dirtbag/run.log`, and records the PID. The VM keeps
-  running after `dirtbag up` returns.
+  so dirtbag starts a small supervisor (a hidden `dirtbag __supervise`) in its
+  own session (`setsid`), with output redirected to `.dirtbag/run.log`. The
+  supervisor runs `tart run --no-graphics` as its child and relays the
+  `[network]` forwards to the guest's IP. It exits when the VM stops, which
+  frees the host ports. The VM keeps running after `dirtbag up` returns.
 - **No host state file.** Tart is the source of truth for whether a VM exists
   and is running; the VM name is derived from the project (`config.name`, or a
-  hash of the project path). The project-local `.dirtbag/` directory holds only
+  hash of the project path). The active forwards are read back from the
+  supervisor's command line. The project-local `.dirtbag/` directory holds only
   the run log.
 - **Access is over SSH** (libssh2). The same session handles the boot readiness
   probe, `ssh -- CMD`, the interactive PTY shell, SCP copy-in, and running

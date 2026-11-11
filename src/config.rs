@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::forward::Forward;
 use crate::tart::{self, DirShare};
 
 pub const CONFIG_FILE: &str = "dirtbag.toml";
@@ -63,6 +64,22 @@ pub struct Config {
 
     #[serde(default)]
     pub ssh: Ssh,
+
+    #[serde(default, skip_serializing_if = "Network::is_empty")]
+    pub network: Network,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Network {
+    /// TCP forwards from the host to the guest, as `[bind:]host:guest`.
+    #[serde(default)]
+    pub forward: Vec<Forward>,
+}
+
+impl Network {
+    fn is_empty(&self) -> bool {
+        self.forward.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -205,6 +222,7 @@ impl Config {
         validate_steps(&self.provisions, "provision")?;
         validate_steps(&self.on_boots, "on-boot")?;
         validate_steps(&self.on_shutdowns, "on-shutdown")?;
+        crate::forward::validate(&self.network.forward)?;
         Ok(())
     }
 

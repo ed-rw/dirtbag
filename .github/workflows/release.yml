@@ -60,6 +60,17 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target "$TARGET"
 
+      # The binary must run on a Mac without Homebrew, so it may link only
+      # system libraries.
+      - name: Check linked libraries
+        run: |
+          bin="target/$TARGET/release/dirtbag"
+          otool -L "$bin"
+          if otool -L "$bin" | tail -n +2 | grep -vE '^[[:space:]]+(/usr/lib/|/System/)'; then
+            echo "dirtbag links a library outside /usr/lib and /System" >&2
+            exit 1
+          fi
+
       - name: Package
         run: |
           name="dirtbag-${{ steps.crate.outputs.version }}-$TARGET"

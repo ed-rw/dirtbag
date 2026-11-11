@@ -60,4 +60,16 @@ pub enum Command {
 
     /// Download the latest release from GitHub and install it over this binary.
     Update,
+
+    /// Run the VM process and forward ports to it. `up` starts this.
+    #[command(name = "__supervise", hide = true)]
+    Supervise {
+        #[arg(long)]
+        vm: String,
+        #[arg(long = "forward")]
+        forwards: Vec<crate::forward::Forward>,
+        /// The VM process to run (after `--`).
+        #[arg(last = true, required = true)]
+        child: Vec<String>,
+    },
 }

@@ -1,15 +1,52 @@
 //! CLI integration tests.
 //!
 //! These drive the built `dirtbag` binary. The default set needs no VM (config
-//! discovery, `init`, argument errors). The end-to-end test is `#[ignore]`d
-//! because it needs an Apple-Silicon host with `tart`, network access, and
-//! macOS Local Network permission; run it with `cargo test -- --ignored`.
+//! discovery, `init`, argument errors). The end-to-end tests are `#[ignore]`d
+//! because they need an Apple-Silicon host with `tart`, network access, and
+//! macOS Local Network permission; run them with `cargo test -- --ignored`.
+//! At most [`MAX_VM_TESTS`] of them run at the same time (see [`vm_slot`]).
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use tempfile::{TempDir, tempdir};
+
+/// The number of end-to-end tests that can run at the same time. When six VMs
+/// boot or restart together, some guests do not get a network, and the tests
+/// fail at random.
+const MAX_VM_TESTS: usize = 2;
+
+static VM_TESTS: Mutex<usize> = Mutex::new(0);
+static VM_SLOT_FREE: Condvar = Condvar::new();
+
+/// A permit to run VMs. The test holds it until it returns or panics.
+struct VmSlot;
+
+/// Wait until fewer than [`MAX_VM_TESTS`] end-to-end tests run, then take a
+/// slot. Call it first in each test, so the slot is released after the test
+/// cleans up.
+fn vm_slot() -> VmSlot {
+    let mut running = VM_SLOT_FREE
+        .wait_while(lock_vm_tests(), |n| *n >= MAX_VM_TESTS)
+        .unwrap_or_else(|e| e.into_inner());
+    *running += 1;
+    VmSlot
+}
+
+impl Drop for VmSlot {
+    fn drop(&mut self) {
+        *lock_vm_tests() -= 1;
+        VM_SLOT_FREE.notify_one();
+    }
+}
+
+/// Lock the counter. A panic cannot leave it wrong, because no code panics
+/// while it holds the lock, so ignore the poison flag.
+fn lock_vm_tests() -> MutexGuard<'static, usize> {
+    VM_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn dirtbag() -> Command {
     Command::new(env!("CARGO_BIN_EXE_dirtbag"))
@@ -23,15 +60,18 @@ fn run_in(dir: &Path, args: &[&str]) -> Output {
         .expect("spawning dirtbag")
 }
 
-/// Write a stub `tart` that reports no VMs: `list` gives an empty set and every
-/// other subcommand fails, which is what a real `tart` does for a VM that was
-/// never created.
+/// Write a stub `tart` that reports no VMs: `list` gives an empty set, `get`
+/// reports that the VM does not exist, and every other subcommand fails. A real
+/// `tart` does the same for a VM that was never created.
 fn stub_tart() -> TempDir {
     let dir = tempdir().unwrap();
     let bin = dir.path().join("tart");
     std::fs::write(
         &bin,
-        "#!/bin/sh\ncase \"$1\" in\nlist) echo '[]' ;;\n*) exit 1 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n\
+         list) echo '[]' ;;\n\
+         get) echo \"the specified VM \\\"$2\\\" does not exist\" >&2; exit 2 ;;\n\
+         *) exit 1 ;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -199,6 +239,7 @@ fn status_of_a_missing_instance_reports_not_created() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_up_ssh_destroy() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("dirtbag.toml"),
@@ -228,7 +269,7 @@ fn e2e_up_ssh_destroy() {
     assert!(ls.status.success());
 
     let destroy = run_in(dir.path(), &["destroy"]);
-    assert!(destroy.status.success());
+    assert_ok(&destroy, "destroy");
     assert!(!dir.path().join(".dirtbag").exists());
 }
 
@@ -238,6 +279,7 @@ fn e2e_up_ssh_destroy() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_sibling_sandboxes_are_independent() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     // Same image (pulled once), but a distinct mount tag per sandbox so an `ls`
     // inside each VM proves it booted from its own config.
@@ -298,7 +340,7 @@ fn e2e_sibling_sandboxes_are_independent() {
     );
 
     // Destroy the default; the sibling keeps running with its log intact.
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
     assert!(
         String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout).contains("not created"),
         "main VM should be gone after destroy"
@@ -317,7 +359,7 @@ fn e2e_sibling_sandboxes_are_independent() {
 
     // The sibling still works end to end, then destroys cleanly.
     assert!(run_gpu(&["ssh", "--", "true"]).status.success());
-    assert!(run_gpu(&["destroy"]).status.success());
+    assert_ok(&run_gpu(&["destroy"]), "destroy");
     assert!(
         !dir.path().join(".dirtbag").exists(),
         "the shared state dir should be gone once both sandboxes are destroyed"
@@ -329,6 +371,7 @@ fn e2e_sibling_sandboxes_are_independent() {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_instances_of_one_config_are_independent() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("dirtbag.toml"),
@@ -391,7 +434,7 @@ fn e2e_instances_of_one_config_are_independent() {
     );
 
     // Destroy the instance. The base VM keeps running with its log intact.
-    assert!(run_two(&["destroy"]).status.success());
+    assert_ok(&run_two(&["destroy"]), "destroy");
     assert!(
         String::from_utf8_lossy(&run_two(&["status"]).stdout).contains("not created"),
         "instance should be gone after destroy"
@@ -400,10 +443,194 @@ fn e2e_instances_of_one_config_are_independent() {
     assert!(dir.path().join(".dirtbag/run.log").is_file());
     assert!(run_in(dir.path(), &["ssh", "--", "true"]).status.success());
 
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
     assert!(
         !dir.path().join(".dirtbag").exists(),
         "the state dir should be gone once both instances are destroyed"
+    );
+}
+
+/// A config with port forwards, on the cached Ubuntu image.
+fn forward_config(forwards: &str) -> String {
+    format!(
+        "image = \"ghcr.io/cirruslabs/ubuntu:latest\"\n\
+         [resources]\ncpu = 2\nmemory = 2048\n\
+         [network]\nforward = [{forwards}]\n"
+    )
+}
+
+/// The host ports from the `forward 127.0.0.1:PORT -> GUEST` lines of `up`.
+fn forwarded_ports(out: &Output) -> Vec<u16> {
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("forward "))
+        .map(|l| {
+            let host = l.split(" -> ").next().unwrap();
+            host.rsplit(':').next().unwrap().parse().unwrap()
+        })
+        .collect()
+}
+
+/// Read the SSH banner through a forwarded host port. The guest's sshd
+/// listens on port 22, so a banner proves the relay reaches the guest.
+fn ssh_banner(port: u16) -> String {
+    use std::io::Read;
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut buf = [0u8; 64];
+    let n = s.read(&mut buf).unwrap();
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// A free host port, released again for the test to use.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Auto ports (`0:GUEST`) give each instance its own host port, and each one
+/// reaches its own guest.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_auto_forwards_give_each_instance_a_port() {
+    let _slot = vm_slot();
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("dirtbag.toml"), forward_config("\"0:22\"")).unwrap();
+
+    let up_base = run_in(dir.path(), &["up"]);
+    assert!(
+        up_base.status.success(),
+        "base up failed: {}",
+        String::from_utf8_lossy(&up_base.stderr)
+    );
+    let up_two = run_in(dir.path(), &["-i", "two", "up"]);
+    assert!(
+        up_two.status.success(),
+        "instance up failed: {}",
+        String::from_utf8_lossy(&up_two.stderr)
+    );
+
+    let (base_ports, two_ports) = (forwarded_ports(&up_base), forwarded_ports(&up_two));
+    assert_eq!(base_ports.len(), 1, "{base_ports:?}");
+    assert_eq!(two_ports.len(), 1, "{two_ports:?}");
+    assert_ne!(base_ports[0], two_ports[0]);
+    for port in [base_ports[0], two_ports[0]] {
+        let banner = ssh_banner(port);
+        assert!(banner.starts_with("SSH-2.0"), "port {port}: {banner:?}");
+    }
+
+    let status = String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout).into_owned();
+    for port in [base_ports[0], two_ports[0]] {
+        assert!(
+            status.contains(&format!("127.0.0.1:{port} -> 22")),
+            "status should show port {port}:\n{status}"
+        );
+    }
+
+    let two_status =
+        String::from_utf8_lossy(&run_in(dir.path(), &["-i", "two", "status"]).stdout).into_owned();
+    assert!(
+        two_status.contains(&format!("forward: 127.0.0.1:{} -> 22", two_ports[0])),
+        "{two_status}"
+    );
+
+    // A changed forward list applies only on reload, so `up` warns.
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        forward_config("\"0:22\", \"0:80\""),
+    )
+    .unwrap();
+    let again = run_in(dir.path(), &["up"]);
+    assert!(
+        again.status.success(),
+        "up after the config change failed: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("dirtbag reload"),
+        "stderr: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    assert_ok(
+        &run_in(dir.path(), &["-i", "two", "destroy"]),
+        "instance destroy",
+    );
+    assert_ok(&run_in(dir.path(), &["destroy"]), "base destroy");
+}
+
+/// A fixed host port belongs to one VM at a time. A second instance fails
+/// before it clones, and `down` releases the port.
+#[test]
+#[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
+fn e2e_fixed_forward_conflicts_fail_fast_and_down_releases_the_port() {
+    let _slot = vm_slot();
+    let dir = tempdir().unwrap();
+    let port = free_port();
+    std::fs::write(
+        dir.path().join("dirtbag.toml"),
+        forward_config(&format!("\"{port}:22\"")),
+    )
+    .unwrap();
+
+    let up = run_in(dir.path(), &["up"]);
+    assert!(
+        up.status.success(),
+        "up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let name = vm_name_from_up(&up);
+    assert!(ssh_banner(port).starts_with("SSH-2.0"));
+    assert!(
+        String::from_utf8_lossy(&run_in(dir.path(), &["status"]).stdout)
+            .contains(&format!("127.0.0.1:{port} -> 22"))
+    );
+
+    let clash = run_in(dir.path(), &["-i", "two", "up"]);
+    assert!(
+        !clash.status.success(),
+        "a second instance must not take the port"
+    );
+    assert!(
+        String::from_utf8_lossy(&clash.stderr).contains("not available"),
+        "stderr: {}",
+        String::from_utf8_lossy(&clash.stderr)
+    );
+    let list = Command::new("tart").arg("list").output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&list.stdout).contains(&format!("{name}-two")),
+        "the failed instance should not have been cloned"
+    );
+
+    assert!(run_in(dir.path(), &["down"]).status.success());
+    let released = (0..10).any(|_| {
+        port_is_free(port) || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            false
+        }
+    });
+    assert!(released, "down should release host port {port}");
+
+    // The forward comes back on the next boot.
+    assert!(run_in(dir.path(), &["up"]).status.success());
+    assert!(ssh_banner(port).starts_with("SSH-2.0"));
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
+}
+
+/// Assert that a dirtbag run succeeded. Show its stderr if it did not.
+fn assert_ok(out: &Output, what: &str) {
+    assert!(
+        out.status.success(),
+        "{what} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -422,6 +649,7 @@ fn vm_name_from_up(out: &Output) -> String {
 #[test]
 #[ignore = "needs Apple-Silicon host, tart, and network; run with --ignored"]
 fn e2e_provision_runs_once_across_restarts() {
+    let _slot = vm_slot();
     let dir = tempdir().unwrap();
     // Each provisioner run appends a line to one guest file; each on-boot run
     // appends to another. The line counts show provision runs once while
@@ -525,5 +753,5 @@ fn e2e_provision_runs_once_across_restarts() {
         "explicit provision should run the steps again"
     );
 
-    assert!(run_in(dir.path(), &["destroy"]).status.success());
+    assert_ok(&run_in(dir.path(), &["destroy"]), "destroy");
 }

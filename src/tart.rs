@@ -5,10 +5,14 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::error::TartError;
+
+const LIST_ATTEMPTS: u32 = 5;
+const LIST_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// A VM from `tart list --format json`. serde ignores the other JSON fields
 /// (Disk, Size, Accessed, …).
@@ -50,6 +54,10 @@ impl Resources {
 
 pub fn list_args() -> Vec<String> {
     vec!["list".into(), "--format".into(), "json".into()]
+}
+
+pub fn get_args(name: &str) -> Vec<String> {
+    vec!["get".into(), name.into(), "--format".into(), "json".into()]
 }
 
 pub fn version_args() -> Vec<String> {
@@ -120,6 +128,30 @@ pub fn run_args(name: &str, dirs: &[DirShare], no_graphics: bool) -> Vec<String>
     a
 }
 
+/// The state fields of `tart get --format json`. The output has no name or
+/// source, so [`parse_get`] fills in the name.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VmState {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    running: bool,
+}
+
+pub fn parse_get(name: &str, json: &str) -> Result<Vm, TartError> {
+    let s: VmState = serde_json::from_str(json).map_err(|source| TartError::Parse {
+        cmd: "get".into(),
+        source,
+    })?;
+    Ok(Vm {
+        name: name.into(),
+        source: String::new(),
+        state: s.state,
+        running: s.running,
+    })
+}
+
 pub fn parse_list(json: &str) -> Result<Vec<Vm>, TartError> {
     serde_json::from_str(json).map_err(|source| TartError::Parse {
         cmd: "list".into(),
@@ -138,6 +170,11 @@ impl Tart {
     pub fn locate() -> Result<Self, TartError> {
         let bin = which::which("tart").map_err(|_| TartError::NotFound)?;
         Ok(Self { bin })
+    }
+
+    /// Use the `tart` executable at `bin`.
+    pub fn at(bin: PathBuf) -> Self {
+        Self { bin }
     }
 
     pub fn bin(&self) -> &PathBuf {
@@ -167,13 +204,34 @@ impl Tart {
         Ok(self.checked(&version_args())?.trim().to_string())
     }
 
+    /// List the local VMs. Try again after a short delay if `tart list` fails.
+    /// Use [`Tart::get`] to look up one VM.
+    /// It fails while another VM is part-way through a clone or delete, because
+    /// that VM's directory has no `config.json` yet or any more.
     pub fn list(&self) -> Result<Vec<Vm>, TartError> {
-        parse_list(&self.checked(&list_args())?)
+        let mut attempt = 1;
+        loop {
+            match self.checked(&list_args()) {
+                Ok(json) => return parse_list(&json),
+                Err(TartError::Command { .. }) if attempt < LIST_ATTEMPTS => {
+                    tracing::debug!(attempt, "tart list failed; trying again");
+                    std::thread::sleep(LIST_RETRY_DELAY);
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
-    /// Look up a single VM by name, if it exists locally.
+    /// Look up a single VM by name, if it exists locally. Use `tart get`, not
+    /// `tart list`: it reads only this VM, so a delete of another VM cannot
+    /// make it fail. [`Vm::source`] is empty in the result.
     pub fn get(&self, name: &str) -> Result<Option<Vm>, TartError> {
-        Ok(self.list()?.into_iter().find(|v| v.name == name))
+        match self.checked(&get_args(name)) {
+            Ok(json) => parse_get(name, &json).map(Some),
+            Err(TartError::Command { stderr, .. }) if stderr.contains("does not exist") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Get a VM's IP. Return `Ok(None)` when the VM is stopped or has no DHCP
@@ -310,5 +368,24 @@ mod tests {
     #[test]
     fn parse_list_empty() {
         assert_eq!(parse_list("[\n\n]").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parse_get_reads_real_schema() {
+        let json = r#"{
+  "Size" : "5.436",
+  "Disk" : 20,
+  "Memory" : 4096,
+  "Display" : "1024x768",
+  "Running" : true,
+  "OS" : "linux",
+  "CPU" : 2,
+  "State" : "running",
+  "DiskFormat" : "raw"
+}"#;
+        let vm = parse_get("dev", json).unwrap();
+        assert_eq!(vm.name, "dev");
+        assert_eq!(vm.state, "running");
+        assert!(vm.running);
     }
 }
