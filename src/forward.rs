@@ -23,9 +23,6 @@ const GUEST_IP_TIMEOUT: Duration = Duration::from_secs(30);
 const GUEST_IP_POLL: Duration = Duration::from_secs(1);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const BIND_RETRY_DELAY: Duration = Duration::from_millis(200);
-const KEEPALIVE_IDLE_SECS: u32 = 60;
-const KEEPALIVE_INTERVAL_SECS: u32 = 10;
-const KEEPALIVE_PROBES: u32 = 6;
 
 /// One forward: `[bind:]host:guest`. A `host` port of 0 means "pick a free
 /// port" until [`reserve`] replaces it with a real one.
@@ -228,21 +225,13 @@ where
     F: Fn(bool) -> Option<IpAddr>,
 {
     let upstream = connect_guest(guest, &guest_ip)?;
+    // A guest that stops or changes IP then closes the relay, and its threads
+    // and sockets go away.
     for stream in [&client, &upstream] {
-        enable_keepalive(stream).context("enabling TCP keepalive")?;
+        crate::tcp::enable_keepalive(stream).context("enabling TCP keepalive")?;
     }
     relay(client, upstream)?;
     Ok(())
-}
-
-/// Send keepalive probes on an idle connection. A guest that stops or
-/// changes IP then closes the relay, and its threads and sockets go away.
-fn enable_keepalive(stream: &TcpStream) -> nix::Result<()> {
-    use nix::sys::socket::{setsockopt, sockopt};
-    setsockopt(stream, sockopt::KeepAlive, &true)?;
-    setsockopt(stream, sockopt::TcpKeepAlive, &KEEPALIVE_IDLE_SECS)?;
-    setsockopt(stream, sockopt::TcpKeepInterval, &KEEPALIVE_INTERVAL_SECS)?;
-    setsockopt(stream, sockopt::TcpKeepCount, &KEEPALIVE_PROBES)
 }
 
 /// Connect to the guest port. Wait for the guest to get an IP, and look the IP
@@ -503,23 +492,6 @@ mod tests {
         assert!(bind_when_available(&f, Duration::from_secs(30)).is_err());
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(is_listening(&f));
-    }
-
-    #[test]
-    fn keepalive_is_on_with_short_probes() {
-        use nix::sys::socket::{getsockopt, sockopt};
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        enable_keepalive(&stream).unwrap();
-        assert!(getsockopt(&stream, sockopt::KeepAlive).unwrap());
-        assert_eq!(
-            getsockopt(&stream, sockopt::TcpKeepAlive).unwrap(),
-            KEEPALIVE_IDLE_SECS
-        );
-        assert_eq!(
-            getsockopt(&stream, sockopt::TcpKeepCount).unwrap(),
-            KEEPALIVE_PROBES
-        );
     }
 
     #[test]

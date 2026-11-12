@@ -261,6 +261,12 @@ fn e2e_up_ssh_destroy() {
     let jq = run_in(dir.path(), &["ssh", "--", "jq", "--version"]);
     assert!(jq.status.success());
 
+    // A command that prints nothing for longer than an SSH keepalive interval
+    // completes.
+    let quiet = run_in(dir.path(), &["ssh", "--", "sleep 20 && echo done"]);
+    assert_ok(&quiet, "quiet ssh command");
+    assert_eq!(String::from_utf8_lossy(&quiet.stdout).trim(), "done");
+
     // Mount is live.
     let ls = run_in(
         dir.path(),

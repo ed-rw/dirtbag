@@ -26,13 +26,16 @@ impl Ssh {
             .with_context(|| format!("no address for {host}:{port}"))?;
         let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
             .with_context(|| format!("connecting to {host}:{port}"))?;
+        // A guest that stops then fails a read, so a command does not hang.
+        crate::tcp::enable_keepalive(&tcp).context("enabling TCP keepalive")?;
 
         let mut session = Session::new().context("creating ssh session")?;
         session.set_tcp_stream(tcp);
+        // Do not use `set_keepalive`. A blocking read in libssh2 then fails
+        // with "Timed out waiting on socket" when no data comes for one
+        // keepalive interval (`_libssh2_wait_socket`). Thus a quiet command
+        // fails. The TCP keepalive above detects a dead guest.
         session.handshake().context("ssh handshake")?;
-        // Ask libssh2 for keepalives so a quiet channel does not stall behind a
-        // NAT idle timeout during a long `exec` step.
-        session.set_keepalive(true, 15);
         session
             .userauth_password(user, password)
             .context("ssh password authentication")?;
