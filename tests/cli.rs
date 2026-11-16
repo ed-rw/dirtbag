@@ -84,16 +84,20 @@ fn stub_tart() -> TempDir {
 /// change the result.
 fn run_with_stub_tart(dir: &Path, args: &[&str]) -> Output {
     let stub = stub_tart();
-    let path = match std::env::var_os("PATH") {
-        Some(p) => format!("{}:{}", stub.path().display(), p.to_string_lossy()),
-        None => stub.path().display().to_string(),
-    };
     dirtbag()
         .args(args)
         .current_dir(dir)
-        .env("PATH", path)
+        .env("PATH", path_with(&stub))
         .output()
         .expect("spawning dirtbag")
+}
+
+/// `PATH` with `stub` first.
+fn path_with(stub: &TempDir) -> String {
+    match std::env::var_os("PATH") {
+        Some(p) => format!("{}:{}", stub.path().display(), p.to_string_lossy()),
+        None => stub.path().display().to_string(),
+    }
 }
 
 #[test]
@@ -232,6 +236,30 @@ fn status_of_a_missing_instance_reports_not_created() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("not created"));
+}
+
+/// A reader that closes the pipe, such as `head`, stops dirtbag by SIGPIPE,
+/// as it stops other Unix tools. dirtbag does not panic.
+#[test]
+fn a_closed_stdout_pipe_stops_dirtbag_quietly() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = tempdir().unwrap();
+    run_in(dir.path(), &["init"]);
+    let stub = stub_tart();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+
+    let out = dirtbag()
+        .arg("status")
+        .current_dir(dir.path())
+        .env("PATH", path_with(&stub))
+        .stdout(writer)
+        .output()
+        .expect("spawning dirtbag");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert_eq!(out.status.signal(), Some(13), "status: {:?}", out.status);
 }
 
 /// Full lifecycle against a real VM. Ignored by default; needs tart + a Linux

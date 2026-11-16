@@ -1,6 +1,6 @@
 [package]
 name = "dirtbag"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A CLI for managing Tart VMs as disposable dev sandboxes"
 license = "MIT"
